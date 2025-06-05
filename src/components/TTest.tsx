@@ -15,7 +15,6 @@ import { styled } from '@mui/material/styles';
 import CloudUploadIcon from '@mui/icons-material/CloudUpload';
 import FileUploadIcon from '@mui/icons-material/FileUpload';
 import Papa from 'papaparse';
-import ttest from 'ttest'; // Assuming a default export
 
 interface GroupStats {
   mean: number;
@@ -95,7 +94,6 @@ const TTest: React.FC<TTestProps> = ({ data, columns }) => {
   const [populationMean, setPopulationMean] = useState<number>(0);
   const [significanceLevel, setSignificanceLevel] = useState<number>(0.05);
   const [result, setResult] = useState<TestResult | null>(null);
-  const [loading, setLoading] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
   const [file, setFile] = useState<File | null>(null);
   const [isProcessing, setIsProcessing] = useState<boolean>(false);
@@ -224,68 +222,6 @@ const TTest: React.FC<TTestProps> = ({ data, columns }) => {
     }
   };
 
-  const validateCSVData = (data: Record<string, any>[]): boolean => {
-    if (!data || data.length === 0) {
-      setError('The CSV file is empty');
-      return false;
-    }
-
-    // Check if all rows have the same number of columns
-    const columnCount = Object.keys(data[0]).length;
-    const hasConsistentColumns = data.every(row => Object.keys(row).length === columnCount);
-    if (!hasConsistentColumns) {
-      setError('The CSV file has inconsistent number of columns');
-      return false;
-    }
-
-    // Check for minimum number of rows
-    if (data.length < 3) {
-      setError('The CSV file must contain at least 3 rows of data');
-      return false;
-    }
-
-    return true;
-  };
-
-  const processCSVFile = (file: File): Promise<ParsedData> => {
-    return new Promise((resolve, reject) => {
-      Papa.parse(file, {
-        header: true,
-        dynamicTyping: true,
-        skipEmptyLines: true,
-        complete: (results) => {
-          if (results.errors.length > 0) {
-            reject(new Error('Error parsing CSV file: ' + results.errors[0].message));
-            return;
-          }
-          resolve({
-            data: results.data as Record<string, any>[],
-            columns: results.meta.fields || []
-          });
-        },
-        error: (error) => {
-          reject(new Error('Error reading file: ' + error.message));
-        }
-      });
-    });
-  };
-
-  // Helper function to calculate mean (could be more robust)
-  const calculateMean = (data: number[]): number => {
-      if (data.length === 0) return 0;
-      const sum = data.reduce((acc, val) => acc + val, 0);
-      return sum / data.length;
-  };
-
-  // Helper function to calculate standard deviation (sample standard deviation)
-  const calculateStdDev = (data: number[]): number => {
-      if (data.length < 2) return 0;
-      const mean = calculateMean(data);
-      const variance = data.reduce((acc, val) => acc + Math.pow(val - mean, 2), 0) / (data.length - 1);
-      return Math.sqrt(variance);
-  };
-
-  // Add these validation functions after the existing helper functions
   const validatePairedTTest = (data: Record<string, any>[], metricCol: string, groupingCol: string, pairingCol: string): { 
     isValid: boolean; 
     error: string | null;
@@ -746,7 +682,7 @@ const TTest: React.FC<TTestProps> = ({ data, columns }) => {
                 variant="contained"
                 color="primary"
                 onClick={handlePerformTest}
-                disabled={loading || !metricColumn || 
+                disabled={isProcessing || !metricColumn || 
                           (testType === 'independent' && (!groupingColumn || (showGroupSelection && selectedGroups.length !== 2) || (!showGroupSelection && availableGroups.length !== 2))) ||
                           (testType === 'one-sample' && (populationMean === undefined || populationMean === null)) ||
                           (testType === 'paired' && !pairingKey) ||
@@ -759,7 +695,7 @@ const TTest: React.FC<TTestProps> = ({ data, columns }) => {
           </Grid>
         )}
 
-        {loading ? (
+        {isProcessing ? (
           <Box sx={{ display: 'flex', justifyContent: 'center', mt: 3 }}>
             <CircularProgress />
           </Box>

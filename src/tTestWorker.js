@@ -4,7 +4,6 @@
 
 // Import necessary libraries within the worker
 const Papa = require('papaparse');
-const ttest = require('ttest');
 importScripts('https://cdnjs.cloudflare.com/ajax/libs/jstat/1.9.6/jstat.min.js');
 
 // Helper function to calculate mean (copied from TTest.tsx)
