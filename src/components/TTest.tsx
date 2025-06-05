@@ -14,7 +14,6 @@ import Button from '@mui/material/Button';
 import { styled } from '@mui/material/styles';
 import CloudUploadIcon from '@mui/icons-material/CloudUpload';
 import FileUploadIcon from '@mui/icons-material/FileUpload';
-import Papa from 'papaparse';
 
 interface GroupStats {
   mean: number;
@@ -382,7 +381,7 @@ const TTest: React.FC<TTestProps> = ({ data, columns }) => {
     if (validPairsCount === 0) {
       return {
         isValid: false,
-        error: "No valid pairs found. Each individual (identified by the pairing key) must appear exactly once in each group.",
+        error: `No valid pairs found out of ${totalPairs} total pairs. Each individual (identified by the pairing key) must appear exactly once in each group.`,
         warning: null,
         validPairs: {}
       };
@@ -401,7 +400,7 @@ const TTest: React.FC<TTestProps> = ({ data, columns }) => {
       if (skippedPairs > 0) {
         warnings.push(`${skippedPairs} skipped pairs (invalid group values)`);
       }
-      warning = `Warning: Found ${warnings.join(', ')}. These pairs will be excluded from the analysis. Proceeding with ${validPairsCount} valid pairs.`;
+      warning = `Warning: Found ${warnings.join(', ')} out of ${totalPairs} total pairs. These pairs will be excluded from the analysis. Proceeding with ${validPairsCount} valid pairs.`;
     }
 
     return {
