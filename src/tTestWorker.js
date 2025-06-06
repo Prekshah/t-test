@@ -1,10 +1,11 @@
 /* eslint-env worker */
-/* global jStat */
+/* global jStat, Papa */
+/* eslint-disable no-restricted-globals */
 // tTestWorker.js
 
 // Import necessary libraries within the worker
-const Papa = require('papaparse');
 importScripts('https://cdnjs.cloudflare.com/ajax/libs/jstat/1.9.6/jstat.min.js');
+importScripts('https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.3.0/papaparse.min.js');
 
 // Helper function to calculate mean (copied from TTest.tsx)
 const calculateMean = (data) => {
@@ -45,32 +46,40 @@ const validateCSVData = (data) => {
   return { isValid: true, error: null };
 };
 
-// Process CSV File (adapted from TTest.tsx)
+// Process CSV File
 const processCSVFile = (file) => {
     return new Promise((resolve, reject) => {
-      Papa.parse(file, {
-        header: true,
-        dynamicTyping: true,
-        skipEmptyLines: true,
-        complete: (results) => {
-          if (results.errors.length > 0) {
-            reject(new Error('Error parsing CSV file: ' + results.errors[0].message));
-            return;
-          }
-          const validation = validateCSVData(results.data);
-          if (!validation.isValid) {
-              reject(new Error(validation.error));
-              return;
-          }
-          resolve({
-            data: results.data,
-            columns: results.meta.fields || []
-          });
-        },
-        error: (error) => {
-          reject(new Error('Error reading file: ' + error.message));
-        }
-      });
+        const reader = new FileReader();
+        reader.onload = (e) => {
+            const csvText = e.target.result;
+            Papa.parse(csvText, {
+                header: true,
+                dynamicTyping: true,
+                skipEmptyLines: true,
+                complete: (results) => {
+                    if (results.errors.length > 0) {
+                        reject(new Error('Error parsing CSV file: ' + results.errors[0].message));
+                        return;
+                    }
+                    const validation = validateCSVData(results.data);
+                    if (!validation.isValid) {
+                        reject(new Error(validation.error));
+                        return;
+                    }
+                    resolve({
+                        data: results.data,
+                        columns: results.meta.fields || []
+                    });
+                },
+                error: (error) => {
+                    reject(new Error('Error reading file: ' + error.message));
+                }
+            });
+        };
+        reader.onerror = () => {
+            reject(new Error('Error reading file'));
+        };
+        reader.readAsText(file);
     });
 };
 
@@ -320,203 +329,117 @@ const oneSampleTTest = (data, populationMean, significanceLevel) => {
 };
 
 // Perform T-Test (copied and adapted from TTest.tsx)
-const performTTest = (data, metricColumn, groupingColumn, pairingKey, populationMean, significanceLevel, testType, selectedGroups, showGroupSelection, availableGroups) => {
-    if (!data || !metricColumn) {
-        return { error: 'Data and metric column are required.' };
-    }
-
-    let dataToAnalyze = data;
-    let calculatedResult = null;
-    let error = null;
-
+const performTTest = (data, metricColumn, groupingColumn, pairingKey, populationMean, significanceLevel, testType, controlGroup, treatmentGroups) => {
     try {
-        if (testType === 'one-sample') {
-            if (populationMean === undefined || populationMean === null) {
-                error = 'Please provide a population mean for the one-sample test.';
-            } else {
-                const metricData = dataToAnalyze
-                    .map(row => row[metricColumn])
-                    .filter(value => value !== null && value !== undefined && typeof value === 'number');
-                    
-                if (metricData.length === 0) {
-                    error = 'No numeric data found in the metric column.';
-                } else {
-                    const testResult = oneSampleTTest(metricData, populationMean, significanceLevel);
-                    
-                    calculatedResult = {
-                        testType: 'One-Sample T-Test',
-                        metricType: 'Continuous',
-                        groupStats: {
-                            'Sample': {
-                                mean: testResult.sampleMean,
-                                stdDev: testResult.sampleStdDev,
-                                sampleSize: testResult.sampleSize
-                            }
-                        },
-                        populationMean: testResult.populationMean,
-                        tStatistic: testResult.tStatistic,
-                        degreesOfFreedom: testResult.degreesOfFreedom,
-                        pValue: testResult.pValue,
-                        standardError: testResult.standardError,
-                        confidenceInterval: testResult.confidenceInterval,
-                        confidenceLevel: 1 - significanceLevel,
-                        conclusion: testResult.rejectNull ? 'Reject null hypothesis' : 'Fail to reject null hypothesis',
-                        interpretation: testResult.rejectNull ?
-                            `There is significant evidence that the population mean differs from ${populationMean} (p < ${significanceLevel})` :
-                            `There is not enough evidence to conclude that the population mean differs from ${populationMean} (p ≥ ${significanceLevel})`
-                    };
-                }
-            }
-        } else if (testType === 'independent') {
-            if (!groupingColumn) {
-                error = 'Please select a grouping column for the independent test.';
-            } else {
-                // Get unique groups from the data
-                const uniqueGroups = Array.from(new Set(data.map(row => row[groupingColumn])))
-                    .filter(group => group !== null && group !== undefined);
+        // Get unique groups if not provided
+        const uniqueGroups = Array.from(new Set(data.map(row => row[groupingColumn])))
+            .filter(group => group !== null && group !== undefined);
 
-                // Determine which groups to compare
-                let groupsToCompare;
-                if (showGroupSelection) {
-                    // If group selection is enabled, use the selected groups
-                    if (selectedGroups.length !== 2) {
-                        error = 'Please select exactly two groups to compare.';
-                        return { error };
-                    }
-                    groupsToCompare = selectedGroups;
-                } else {
-                    // If no group selection, check if there are exactly two groups
-                    if (uniqueGroups.length !== 2) {
-                        error = 'Please select exactly two groups to compare.';
-                        return { error };
-                    }
-                    groupsToCompare = uniqueGroups;
-                }
-
-                // Filter data to include only rows with the selected groups
-                dataToAnalyze = data.filter(row => groupsToCompare.includes(row[groupingColumn]));
-
-                // Extract metric data for each group
-                const group1Data = dataToAnalyze
-                    .filter(row => row[groupingColumn] === groupsToCompare[0])
-                    .map(row => row[metricColumn])
-                    .filter(value => value !== null && value !== undefined && typeof value === 'number');
-
-                const group2Data = dataToAnalyze
-                    .filter(row => row[groupingColumn] === groupsToCompare[1])
-                    .map(row => row[metricColumn])
-                    .filter(value => value !== null && value !== undefined && typeof value === 'number');
-
-                if (group1Data.length < 2 || group2Data.length < 2) {
-                    error = 'Each group must have at least 2 data points for an independent t-test.';
-                } else {
-                    // Perform Levene's test
-                    const leveneResult = levenesTest(group1Data, group2Data);
-                    
-                    // Perform appropriate t-test based on Levene's result
-                    const testResult = leveneResult.equalVariance ? 
-                        studentsTTest(group1Data, group2Data) : 
-                        welchsTTest(group1Data, group2Data);
-
-                    calculatedResult = {
-                        testType: leveneResult.equalVariance ? "Student's t-test" : "Welch's t-test",
-                        metricType: 'Continuous',
-                        equalVariance: leveneResult.equalVariance,
-                        levenePValue: leveneResult.pValue,
-                        groupStats: {
-                            [groupsToCompare[0]]: testResult.groupStats.group1,
-                            [groupsToCompare[1]]: testResult.groupStats.group2
-                        },
-                        tStatistic: testResult.tStatistic,
-                        degreesOfFreedom: testResult.degreesOfFreedom,
-                        pValue: testResult.pValue,
-                        confidenceLevel: 1 - significanceLevel,
-                        conclusion: testResult.pValue < significanceLevel ? 'Reject null hypothesis' : 'Fail to reject null hypothesis',
-                        interpretation: testResult.pValue < significanceLevel ? 
-                            'Statistically significant difference between the groups' : 
-                            'No statistically significant difference between the groups'
-                    };
-                }
-            }
-        } else if (testType === 'paired') {
-            if (!pairingKey || !groupingColumn) {
-                error = 'Please select both a pairing key column and a grouping column for the paired test.';
-            } else {
-                try {
-                    // Validate and prepare the data
-                    const { uniqueGroups, groupedData } = validatePairedData(data, metricColumn, groupingColumn, pairingKey);
-                    
-                    // Reshape the data into paired format
-                    const { pairedData, group1Name, group2Name } = reshapePairedData(groupedData, metricColumn, groupingColumn, uniqueGroups);
-                    
-                    // Perform the paired t-test
-                    const testResult = pairedTTest(pairedData);
-
-                    // Calculate group statistics
-                    const group1Values = pairedData.map(pair => pair.group1Value);
-                    const group2Values = pairedData.map(pair => pair.group2Value);
-
-                    calculatedResult = {
-                        testType: 'Paired T-Test',
-                        metricType: 'Continuous',
-                        groupStats: {
-                            [group1Name]: {
-                                mean: calculateMean(group1Values),
-                                stdDev: calculateStdDev(group1Values),
-                                sampleSize: group1Values.length
-                            },
-                            [group2Name]: {
-                                mean: calculateMean(group2Values),
-                                stdDev: calculateStdDev(group2Values),
-                                sampleSize: group2Values.length
-                            }
-                        },
-                        tStatistic: testResult.tStatistic,
-                        degreesOfFreedom: testResult.degreesOfFreedom,
-                        pValue: testResult.pValue,
-                        confidenceLevel: 1 - significanceLevel,
-                        meanDifference: testResult.meanDifference,
-                        stdDevDifference: testResult.stdDevDifference,
-                        conclusion: testResult.pValue < significanceLevel ? 'Reject null hypothesis' : 'Fail to reject null hypothesis',
-                        interpretation: testResult.pValue < significanceLevel ? 
-                            'There is a statistically significant difference between the paired measurements' : 
-                            'There is no statistically significant difference between the paired measurements'
-                    };
-                } catch (err) {
-                    error = err.message;
-                }
-            }
+        if (uniqueGroups.length < 2) {
+            throw new Error('The grouping column must contain at least 2 unique groups.');
         }
-    } catch (err) {
-        error = err instanceof Error ? err.message : 'An error occurred during the test calculation';
+
+        // For one-sample t-test
+        if (testType === 'oneSample') {
+            return oneSampleTTest(data.map(row => row[metricColumn]), populationMean, significanceLevel);
+        }
+
+        // For paired t-test
+        if (testType === 'paired') {
+            const validation = validatePairedData(data, metricColumn, groupingColumn, pairingKey);
+            const pairedData = reshapePairedData(validation.groupedData, metricColumn, groupingColumn, validation.uniqueGroups);
+            return pairedTTest(pairedData);
+        }
+
+        // For independent t-test with multiple groups
+        const results = [];
+        const numComparisons = treatmentGroups.length; // For Bonferroni correction
+        const adjustedAlpha = significanceLevel / numComparisons;
+
+        // Get control group data
+        const controlData = data
+            .filter(row => row[groupingColumn] === controlGroup)
+            .map(row => row[metricColumn])
+            .filter(val => val !== null && val !== undefined);
+
+        // Perform tests for each treatment group vs control
+        treatmentGroups.forEach(treatmentGroup => {
+            const treatmentData = data
+                .filter(row => row[groupingColumn] === treatmentGroup)
+                .map(row => row[metricColumn])
+                .filter(val => val !== null && val !== undefined);
+
+            // Perform Levene's test
+            const leveneResult = levenesTest(controlData, treatmentData);
+
+            // Choose appropriate t-test based on Levene's result
+            const tTestResult = leveneResult.equalVariance ? 
+                studentsTTest(controlData, treatmentData) :
+                welchsTTest(controlData, treatmentData);
+
+            // Add test details to results
+            results.push({
+                controlGroup,
+                treatmentGroup,
+                testType: 'independent',
+                metricType: typeof data[0][metricColumn] === 'number' ? 'continuous' : 'binary',
+                equalVariance: leveneResult.equalVariance,
+                levenePValue: leveneResult.pValue,
+                tTestUsed: leveneResult.equalVariance ? 'Student\'s t-test' : 'Welch\'s t-test',
+                tStatistic: tTestResult.tStatistic,
+                degreesOfFreedom: tTestResult.degreesOfFreedom,
+                pValue: tTestResult.pValue,
+                adjustedAlpha,
+                significanceLevel,
+                conclusion: tTestResult.pValue < adjustedAlpha ? 'Reject null hypothesis' : 'Fail to reject null hypothesis',
+                interpretation: `Using ${leveneResult.equalVariance ? 'Student\'s' : 'Welch\'s'} t-test (based on Levene's test p=${leveneResult.pValue.toFixed(4)}), ` +
+                    `the difference between ${controlGroup} and ${treatmentGroup} is ` +
+                    `${tTestResult.pValue < adjustedAlpha ? 'statistically significant' : 'not statistically significant'} ` +
+                    `at the Bonferroni-adjusted significance level of ${adjustedAlpha.toFixed(4)} (original α=${significanceLevel})`,
+                groupStats: {
+                    [controlGroup]: tTestResult.groupStats.group1,
+                    [treatmentGroup]: tTestResult.groupStats.group2
+                }
+            });
+        });
+
+        return results;
+    } catch (error) {
+        throw new Error(`Error performing t-test: ${error.message}`);
     }
-    
-    return { result: calculatedResult, error: error };
 };
 
-// Web Worker message handler
-// eslint-disable-next-line no-restricted-globals
+// Handle messages from the main thread
 self.onmessage = async (event) => {
-    const { type, payload } = event.data;
+    try {
+        const { type, payload } = event.data;
 
-    if (type === 'PROCESS_FILE') {
-        try {
-            const parsedData = await processCSVFile(payload.file);
-            // eslint-disable-next-line no-restricted-globals
-            self.postMessage({ type: 'FILE_PROCESSED', payload: parsedData });
-        } catch (error) {
-            // eslint-disable-next-line no-restricted-globals
-            self.postMessage({ type: 'ERROR', payload: { message: error.message } });
+        if (type === 'FILE_UPLOAD') {
+            try {
+                const result = await processCSVFile(payload);
+                self.postMessage({ type: 'FILE_PROCESSED', payload: result });
+            } catch (error) {
+                self.postMessage({ type: 'ERROR', payload: { message: error.message } });
+            }
+        } else if (type === 'PERFORM_TEST') {
+            try {
+                const result = performTTest(
+                    payload.data,
+                    payload.metricColumn,
+                    payload.groupingColumn,
+                    payload.pairingKey,
+                    payload.populationMean,
+                    payload.significanceLevel,
+                    payload.testType,
+                    payload.controlGroup,
+                    payload.treatmentGroups
+                );
+                self.postMessage({ type: 'TEST_COMPLETE', payload: result });
+            } catch (error) {
+                self.postMessage({ type: 'ERROR', payload: { message: error.message } });
+            }
         }
-    } else if (type === 'PERFORM_TEST') {
-        const { data, metricColumn, groupingColumn, pairingKey, populationMean, significanceLevel, testType, selectedGroups, showGroupSelection, availableGroups } = payload;
-        const { result, error } = performTTest(data, metricColumn, groupingColumn, pairingKey, populationMean, significanceLevel, testType, selectedGroups, showGroupSelection, availableGroups);
-        if (error) {
-            // eslint-disable-next-line no-restricted-globals
-            self.postMessage({ type: 'ERROR', payload: { message: error } });
-        } else {
-            // eslint-disable-next-line no-restricted-globals
-            self.postMessage({ type: 'TEST_COMPLETE', payload: result });
-        }
+    } catch (error) {
+        self.postMessage({ type: 'ERROR', payload: { message: error.message } });
     }
 }; 

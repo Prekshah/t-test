@@ -1,8 +1,8 @@
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useState, useRef, useEffect, useCallback } from 'react';
 import Box from '@mui/material/Box';
 import FormControl from '@mui/material/FormControl';
 import InputLabel from '@mui/material/InputLabel';
-import Select from '@mui/material/Select';
+import Select, { SelectChangeEvent } from '@mui/material/Select';
 import MenuItem from '@mui/material/MenuItem';
 import TextField from '@mui/material/TextField';
 import Typography from '@mui/material/Typography';
@@ -14,45 +14,116 @@ import Button from '@mui/material/Button';
 import { styled } from '@mui/material/styles';
 import CloudUploadIcon from '@mui/icons-material/CloudUpload';
 import FileUploadIcon from '@mui/icons-material/FileUpload';
+import Tabs from '@mui/material/Tabs';
+import Tab from '@mui/material/Tab';
+import Chip from '@mui/material/Chip';
+import { Chart as ChartJS, CategoryScale, LinearScale, BarElement, Title, Tooltip, Legend } from 'chart.js';
+import { Chart } from 'react-chartjs-2';
+import jStat from 'jstat';
+import Papa from 'papaparse';
+import { useDropzone } from 'react-dropzone';
+import FormHelperText from '@mui/material/FormHelperText';
+import { Divider } from '@mui/material';
+import { BoxPlotController, BoxAndWiskers } from '@sgratzl/chartjs-chart-boxplot';
+import type { IBoxPlot, BoxPlotControllerDatasetOptions } from '@sgratzl/chartjs-chart-boxplot';
+
+// Register Chart.js components
+ChartJS.register(
+  CategoryScale,
+  LinearScale,
+  BarElement,
+  Title,
+  Tooltip,
+  Legend,
+  BoxPlotController,
+  BoxAndWiskers
+);
+
+interface JStatMethods {
+  mean(arr: number[]): number;
+  stdev(arr: number[], flag?: boolean): number;
+  studentt: {
+    cdf(x: number, df: number): number;
+  };
+  centralF: {
+    cdf(x: number, df1: number, df2: number): number;
+  };
+  quartiles(arr: number[]): number[];
+  median(arr: number[]): number;
+}
+
+const jStatTyped = jStat as unknown as JStatMethods;
 
 interface GroupStats {
   mean: number;
   stdDev: number;
   sampleSize: number;
+  values: number[];
 }
 
-interface TestResult {
-  testType: string;
-  metricType: string;
-  equalVariance?: boolean;
-  levenePValue?: number;
-  groupStats: {
-    [key: string]: GroupStats;
-  };
+interface ConfidenceInterval {
+  lower: number;
+  upper: number;
+}
+
+interface LeveneTestResult {
+  pValue: number;
+  equalVariance: boolean;
+  testUsed: 'Student' | 'Welch';
+}
+
+interface PairwiseComparison {
+  controlGroup: string;
+  treatmentGroup: string;
+  leveneTest: LeveneTestResult;
   tStatistic: number;
   degreesOfFreedom: number;
   pValue: number;
-  confidenceLevel: number;
+  groupStats: Record<string, GroupStats>;
   conclusion: string;
   interpretation: string;
-  meanDifference?: number;
+  confidenceInterval?: ConfidenceInterval;
+  meanDifference: number;
   stdDevDifference?: number;
-  populationMean?: number;
-  standardError?: number;
-  confidenceInterval?: {
-    lower: number;
-    upper: number;
-  };
+  adjustedAlpha: number;
+  testType: 'One-Sample T-Test' | 'Independent T-Test' | 'Paired T-Test';
+}
+
+interface TestResult {
+  testType: 'One-Sample T-Test' | 'Independent T-Test' | 'Paired T-Test';
+  metricType: 'continuous' | 'binary';
+  significanceLevel: number;
+  adjustedAlpha: number;
+  numberOfComparisons: number;
+  comparisons: PairwiseComparison[];
 }
 
 interface TTestProps {
-  data: Record<string, any>[];
-  columns: string[];
+  data?: Record<string, any>[];
+  columns?: string[];
 }
 
-interface ParsedData {
-  data: Record<string, any>[];
-  columns: string[];
+interface TabPanelProps {
+  children?: React.ReactNode;
+  index: number;
+  value: number;
+}
+
+function TabPanel({ children, value, index }: TabPanelProps) {
+  return (
+    <div
+      role="tabpanel"
+      hidden={value !== index}
+      id={`t-test-tabpanel-${index}`}
+      aria-labelledby={`t-test-tab-${index}`}
+    >
+      {value === index && (
+        <Box sx={{ p: 3 }}>
+          {children}
+        </Box>
+      )}
+    </div>
+  );
 }
 
 const UploadArea = styled(Paper)(({ theme }) => ({
@@ -85,732 +156,1176 @@ const VisuallyHiddenInput = styled('input')({
   width: 1,
 });
 
-const TTest: React.FC<TTestProps> = ({ data, columns }) => {
-  const [testType, setTestType] = useState<string>('independent');
-  const [metricColumn, setMetricColumn] = useState<string>('');
-  const [groupingColumn, setGroupingColumn] = useState<string>('');
-  const [pairingKey, setPairingKey] = useState<string>('');
+// Helper function to calculate mean
+const calculateMean = (data: number[]): number => {
+  if (data.length === 0) return 0;
+  return data.reduce((sum, val) => sum + val, 0) / data.length;
+};
+
+interface ChartDataset {
+  label: string;
+  data: number[];
+  backgroundColor: string[];
+  borderColor: string[];
+  borderWidth: number;
+  type?: 'bar' | 'boxplot';  // Add type for mixed charts
+}
+
+interface ChartData {
+  labels: string[];
+  datasets: ChartDataset[];
+}
+
+interface TooltipItem {
+  dataIndex: number;
+  dataset: {
+    label: string;
+    data: number[];
+  };
+}
+
+const CONTROL_GROUP_COLOR = 'rgba(54, 162, 235, 0.7)';
+const TREATMENT_GROUP_COLOR = 'rgba(255, 99, 132, 0.7)';
+const CONTROL_GROUP_BORDER = 'rgba(54, 162, 235, 1)';
+const TREATMENT_GROUP_BORDER = 'rgba(255, 99, 132, 1)';
+
+const calculateBoxPlotStats = (data: number[]) => {
+  const sorted = [...data].sort((a, b) => a - b);
+  const q1 = sorted[Math.floor(sorted.length * 0.25)];
+  const median = sorted[Math.floor(sorted.length * 0.5)];
+  const q3 = sorted[Math.floor(sorted.length * 0.75)];
+  const iqr = q3 - q1;
+  const min = Math.max(q1 - 1.5 * iqr, sorted[0]);
+  const max = Math.min(q3 + 1.5 * iqr, sorted[sorted.length - 1]);
+  
+  return { min, q1, median, q3, max };
+};
+
+interface BoxPlotData {
+  min: number;
+  q1: number;
+  median: number;
+  q3: number;
+  max: number;
+  outliers: number[];
+}
+
+const TTest: React.FC<TTestProps> = ({ data = [], columns = [] }) => {
+  const [file, setFile] = useState<File | null>(null);
+  const [parsedData, setParsedData] = useState<{ data: Record<string, any>[]; columns: string[] } | null>(null);
+  const [isFileAnalyzed, setIsFileAnalyzed] = useState(false);
+  const [testType, setTestType] = useState('independent');
+  const [metricColumn, setMetricColumn] = useState('');
+  const [groupingColumn, setGroupingColumn] = useState('');
   const [populationMean, setPopulationMean] = useState<number>(0);
   const [significanceLevel, setSignificanceLevel] = useState<number>(0.05);
   const [result, setResult] = useState<TestResult | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [file, setFile] = useState<File | null>(null);
-  const [isProcessing, setIsProcessing] = useState<boolean>(false);
-  const [parsedData, setParsedData] = useState<ParsedData | null>(null);
-  const [isFileAnalyzed, setIsFileAnalyzed] = useState<boolean>(false);
+  const [isProcessing, setIsProcessing] = useState(false);
+  const [tabValue, setTabValue] = useState(0);
+  const [availableGroups, setAvailableGroups] = useState<string[]>([]);
+  const [controlGroup, setControlGroup] = useState<string>('');
+  const [treatmentGroups, setTreatmentGroups] = useState<string[]>([]);
+  const [metricType, setMetricType] = useState<'continuous' | 'binary'>('continuous');
+  const [chartData, setChartData] = useState<ChartData | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  // New state for group selection
-  const [availableGroups, setAvailableGroups] = useState<string[]>([]);
-  const [selectedGroups, setSelectedGroups] = useState<string[]>([]);
-  const [showGroupSelection, setShowGroupSelection] = useState<boolean>(false);
-  const [groupSelectionError, setGroupSelectionError] = useState<string | null>(null);
+  const handleFileChange = (event: React.ChangeEvent<HTMLInputElement>) => {
+    const files = event.target.files;
+    if (files && files[0]) {
+      setFile(files[0]);
+      analyzeFile(files[0]);
+    }
+  };
 
-  const [worker, setWorker] = useState<Worker | null>(null);
+  const handleTestTypeChange = (event: SelectChangeEvent) => {
+    setTestType(event.target.value);
+    setResult(null);
+    setControlGroup('');
+    setTreatmentGroups([]);
+  };
 
-  useEffect(() => {
-    const newWorker = new Worker(new URL('../tTestWorker.js', import.meta.url));
-    newWorker.onmessage = (event) => {
-      const { type, payload } = event.data;
-      if (type === 'FILE_PROCESSED') {
-        setParsedData(payload);
-        setIsProcessing(false);
-      } else if (type === 'TEST_COMPLETE') {
-        setResult(payload);
-        setIsProcessing(false);
-      } else if (type === 'ERROR') {
-        setError(payload.message);
-        setIsProcessing(false);
+  const handleMetricColumnChange = (event: SelectChangeEvent) => {
+    const column = event.target.value;
+    setMetricColumn(column);
+    setResult(null);
+
+    // Determine metric type
+    if (parsedData) {
+      const values = parsedData.data.map(row => row[column]);
+      const uniqueValues = new Set(values);
+      setMetricType(uniqueValues.size <= 2 ? 'binary' : 'continuous');
+    }
+  };
+
+  const handleGroupingColumnChange = (event: SelectChangeEvent) => {
+    const column = event.target.value;
+    setGroupingColumn(column);
+    setResult(null);
+
+    if (parsedData) {
+      const groups = Array.from(new Set(parsedData.data.map(row => row[column])));
+      setAvailableGroups(groups);
+      
+      if (groups.length === 2) {
+        // Automatically set first group as control and second as treatment
+        setControlGroup(groups[0]);
+        setTreatmentGroups([groups[1]]);
+      } else {
+        // Reset selections for manual control group choice
+        setControlGroup('');
+        setTreatmentGroups([]);
       }
-    };
-    setWorker(newWorker);
-    return () => newWorker.terminate();
-  }, []);
+    }
+  };
 
-  const handleFileSelect = (event: React.ChangeEvent<HTMLInputElement>) => {
-    const file = event.target.files?.[0];
-    if (file) {
-      // Only set the file and reset states, but don't process yet
-      setFile(file);
-      setIsFileAnalyzed(false);
-      setParsedData(null);
-      setMetricColumn('');
-      setGroupingColumn('');
-      setPairingKey('');
-      setAvailableGroups([]);
-      setSelectedGroups([]);
-      setShowGroupSelection(false);
-      setGroupSelectionError(null);
-      setResult(null);
-      setError(null);
+  const handleControlGroupChange = (event: SelectChangeEvent) => {
+    const selected = event.target.value;
+    setControlGroup(selected);
+    // Automatically set all other groups as treatment groups
+    setTreatmentGroups(availableGroups.filter(group => group !== selected));
+  };
+
+  const calculateLeveneTest = (group1Values: number[], group2Values: number[]): LeveneTestResult => {
+    const leveneStatistic = calculateLeveneStatistic(group1Values, group2Values);
+    const levenePValue = calculateLevenePValue(leveneStatistic, group1Values, group2Values);
+    const equalVariance = levenePValue > significanceLevel;
+
+    return {
+      pValue: levenePValue,
+      equalVariance,
+      testUsed: equalVariance ? 'Student' : 'Welch'
+    };
+  };
+
+  const performPairwiseComparison = (
+    controlValues: number[],
+    treatmentValues: number[],
+    controlName: string,
+    treatmentName: string
+  ): PairwiseComparison => {
+    const leveneTest = calculateLeveneTest(controlValues, treatmentValues);
+
+    // Calculate group statistics
+    const controlStats: GroupStats = {
+      mean: jStatTyped.mean(controlValues),
+      stdDev: jStatTyped.stdev(controlValues, true),
+      sampleSize: controlValues.length,
+      values: controlValues
+    };
+
+    const treatmentStats: GroupStats = {
+      mean: jStatTyped.mean(treatmentValues),
+      stdDev: jStatTyped.stdev(treatmentValues, true),
+      sampleSize: treatmentValues.length,
+      values: treatmentValues
+    };
+
+    // Calculate t-statistic and degrees of freedom based on Levene's test result
+    let tStatistic: number;
+    let degreesOfFreedom: number;
+
+    if (leveneTest.equalVariance) {
+      // Student's t-test (pooled variance)
+      const n1 = controlStats.sampleSize;
+      const n2 = treatmentStats.sampleSize;
+      const pooledStd = Math.sqrt(
+        ((n1 - 1) * controlStats.stdDev ** 2 + (n2 - 1) * treatmentStats.stdDev ** 2) /
+        (n1 + n2 - 2)
+      );
+      tStatistic = (treatmentStats.mean - controlStats.mean) / (pooledStd * Math.sqrt(1/n1 + 1/n2));
+      degreesOfFreedom = n1 + n2 - 2;
+    } else {
+      // Welch's t-test
+      const n1 = controlStats.sampleSize;
+      const n2 = treatmentStats.sampleSize;
+      const s1 = controlStats.stdDev;
+      const s2 = treatmentStats.stdDev;
+      tStatistic = (treatmentStats.mean - controlStats.mean) / Math.sqrt((s1 * s1 / n1) + (s2 * s2 / n2));
+      degreesOfFreedom = Math.floor(
+        ((s1 * s1 / n1 + s2 * s2 / n2) ** 2) /
+        ((s1 * s1 / n1) ** 2 / (n1 - 1) + (s2 * s2 / n2) ** 2 / (n2 - 1))
+      );
+    }
+
+    const pValue = 2 * (1 - jStatTyped.studentt.cdf(Math.abs(tStatistic), degreesOfFreedom));
+    const meanDifference = treatmentStats.mean - controlStats.mean;
+
+    return {
+      controlGroup: controlName,
+      treatmentGroup: treatmentName,
+      leveneTest,
+      tStatistic,
+      degreesOfFreedom,
+      pValue,
+      groupStats: {
+        [controlName]: controlStats,
+        [treatmentName]: treatmentStats
+      },
+      meanDifference,
+      conclusion: '',  // Will be set after Bonferroni correction
+      interpretation: '',  // Will be set after Bonferroni correction
+      confidenceInterval: {
+        lower: meanDifference - 1.96 * Math.sqrt((controlStats.stdDev ** 2 / controlStats.sampleSize) + (treatmentStats.stdDev ** 2 / treatmentStats.sampleSize)),
+        upper: meanDifference + 1.96 * Math.sqrt((controlStats.stdDev ** 2 / controlStats.sampleSize) + (treatmentStats.stdDev ** 2 / treatmentStats.sampleSize))
+      },
+      testType: testType === 'independent' ? 'Independent T-Test' : 'Paired T-Test',
+      adjustedAlpha: significanceLevel / (testType === 'independent' ? treatmentGroups.length : 1)
+    };
+  };
+
+  const handleRunTest = () => {
+    if (!parsedData || !metricColumn || (!groupingColumn && testType !== 'one-sample')) {
+      setError('Please select all required fields');
+      return;
+    }
+
+    if (testType !== 'one-sample' && (!controlGroup || treatmentGroups.length === 0)) {
+      setError('Please select control and treatment groups');
+      return;
+    }
+
+    setIsProcessing(true);
+    setError(null);
+    setResult(null);
+
+    try {
+      let comparisons: PairwiseComparison[] = [];
+      const numberOfComparisons = testType === 'one-sample' ? 1 : treatmentGroups.length;
+      const adjustedAlpha = significanceLevel / numberOfComparisons;
+
+      if (testType === 'one-sample') {
+        // Handle one-sample t-test
+        const metricValues = parsedData.data.map(row => parseFloat(row[metricColumn]));
+        if (metricValues.some(isNaN)) {
+          throw new Error('Invalid numeric data in metric column');
+        }
+
+        const sampleMean = jStatTyped.mean(metricValues);
+        const sampleStd = jStatTyped.stdev(metricValues, true);
+        const n = metricValues.length;
+        const standardError = sampleStd / Math.sqrt(n);
+        const tStatistic = (sampleMean - populationMean) / standardError;
+        const degreesOfFreedom = n - 1;
+        const pValue = 2 * (1 - jStatTyped.studentt.cdf(Math.abs(tStatistic), degreesOfFreedom));
+
+        const comparison: PairwiseComparison = {
+          controlGroup: 'Population',
+          treatmentGroup: 'Sample',
+          leveneTest: {
+            pValue: 1,
+            equalVariance: true,
+            testUsed: 'Student'
+          },
+          tStatistic,
+          degreesOfFreedom,
+          pValue,
+          groupStats: {
+            'Sample': {
+              mean: sampleMean,
+              stdDev: sampleStd,
+              sampleSize: n,
+              values: metricValues
+            }
+          },
+          meanDifference: sampleMean - populationMean,
+          conclusion: pValue < significanceLevel ? 'Reject H₀' : 'Fail to reject H₀',
+          interpretation: pValue < significanceLevel
+            ? `There is sufficient evidence to conclude that the population mean is different from ${populationMean} (p < ${significanceLevel}).`
+            : `There is insufficient evidence to conclude that the population mean is different from ${populationMean} (p > ${significanceLevel}).`,
+          confidenceInterval: {
+            lower: sampleMean - 1.96 * standardError,
+            upper: sampleMean + 1.96 * standardError
+          },
+          testType: 'One-Sample T-Test',
+          adjustedAlpha: significanceLevel
+        };
+
+        comparisons.push(comparison);
+      } else {
+        // Handle independent/paired t-tests
+        treatmentGroups.forEach(treatmentGroup => {
+          const controlValues = parsedData.data
+            .filter(row => row[groupingColumn] === controlGroup)
+            .map(row => parseFloat(row[metricColumn]));
+          
+          const treatmentValues = parsedData.data
+            .filter(row => row[groupingColumn] === treatmentGroup)
+            .map(row => parseFloat(row[metricColumn]));
+
+          if (controlValues.some(isNaN) || treatmentValues.some(isNaN)) {
+            throw new Error('Invalid numeric data in selected columns');
+          }
+
+          const comparison = performPairwiseComparison(
+            controlValues,
+            treatmentValues,
+            controlGroup,
+            treatmentGroup
+          );
+
+          // Add Bonferroni correction details
+          comparison.adjustedAlpha = adjustedAlpha;
+          comparison.conclusion = comparison.pValue < adjustedAlpha ? 'Reject H₀' : 'Fail to reject H₀';
+          comparison.interpretation = comparison.pValue < adjustedAlpha
+            ? `There is sufficient evidence to conclude a significant difference between ${treatmentGroup} and ${controlGroup} (p < ${adjustedAlpha.toFixed(4)}, Bonferroni-adjusted α).`
+            : `There is insufficient evidence to conclude a significant difference between ${treatmentGroup} and ${controlGroup} (p > ${adjustedAlpha.toFixed(4)}, Bonferroni-adjusted α).`;
+
+          comparisons.push(comparison);
+        });
+      }
+
+      const testResult: TestResult = {
+        testType: testType === 'independent' ? 'Independent T-Test' : 
+                  testType === 'paired' ? 'Paired T-Test' : 'One-Sample T-Test',
+        metricType,
+        significanceLevel,
+        adjustedAlpha,
+        numberOfComparisons,
+        comparisons
+      };
+
+      setResult(testResult);
+      updateChartData(testResult);
+    } catch (err) {
+      setError(`Error performing test: ${err instanceof Error ? err.message : 'Unknown error'}`);
+    } finally {
       setIsProcessing(false);
     }
   };
 
-  const handleDrop = (event: React.DragEvent<HTMLDivElement>) => {
-    event.preventDefault();
-    if (event.dataTransfer.files && event.dataTransfer.files[0]) {
-      setFile(event.dataTransfer.files[0]);
-    }
-  };
+  const updateChartData = (result: TestResult) => {
+    if (!result || !parsedData) return;
 
-  const handleDragOver = (event: React.DragEvent<HTMLDivElement>) => {
-    event.preventDefault();
-  };
+    if (result.metricType === 'continuous') {
+      // Create bar chart for continuous data
+      const labels = result.comparisons.map(comp => [comp.controlGroup, comp.treatmentGroup]).flat();
+      const data = result.comparisons.map(comp => [
+        comp.groupStats[comp.controlGroup].mean,
+        comp.groupStats[comp.treatmentGroup].mean
+      ]).flat();
 
-  const handlePerformTest = () => {
-    if (!parsedData || !metricColumn) return;
-    setIsProcessing(true);
-    setError(null);
-
-    // Add validation for paired t-test
-    if (testType === 'paired') {
-      const validation = validatePairedTTest(parsedData.data, metricColumn, groupingColumn, pairingKey);
-      
-      if (!validation.isValid) {
-        setError(validation.error);
-        setIsProcessing(false);
-        return;
-      }
-
-      // If there's a warning but test can proceed, show it
-      if (validation.warning) {
-        setError(validation.warning); // Using error state to show warnings too
-      }
-
-      // Send only the valid pairs to the worker
-      worker?.postMessage({
-        type: 'PERFORM_TEST',
-        payload: {
-          data: Object.values(validation.validPairs).flat(),
-          metricColumn,
-          groupingColumn,
-          pairingKey,
-          testType,
-          significanceLevel
-        }
+      setChartData({
+        labels: labels.map(String),
+        datasets: [{
+          label: 'Group Means',
+          data,
+          backgroundColor: result.comparisons.map(() => ['rgba(54, 162, 235, 0.5)', 'rgba(255, 99, 132, 0.5)']).flat(),
+          borderColor: result.comparisons.map(() => ['rgba(54, 162, 235, 1)', 'rgba(255, 99, 132, 1)']).flat(),
+          borderWidth: 1
+        }]
       });
     } else {
-      // Existing code for other test types
-      worker?.postMessage({
-        type: 'PERFORM_TEST',
-        payload: {
-          data: parsedData.data,
-          metricColumn,
-          groupingColumn,
-          pairingKey,
-          populationMean,
-          significanceLevel,
-          testType,
-          selectedGroups,
-          showGroupSelection,
-          availableGroups
-        }
+      // Create bar chart for binary data
+      const labels = result.comparisons.map(comp => [comp.controlGroup, comp.treatmentGroup]).flat();
+      const data = result.comparisons.map(comp => [
+        comp.groupStats[comp.controlGroup].mean * 100,
+        comp.groupStats[comp.treatmentGroup].mean * 100
+      ]).flat();
+
+      setChartData({
+        labels: labels.map(String),
+        datasets: [{
+          label: 'Proportion (%)',
+          data,
+          backgroundColor: result.comparisons.map(() => ['rgba(54, 162, 235, 0.5)', 'rgba(255, 99, 132, 0.5)']).flat(),
+          borderColor: result.comparisons.map(() => ['rgba(54, 162, 235, 1)', 'rgba(255, 99, 132, 1)']).flat(),
+          borderWidth: 1
+        }]
       });
     }
   };
 
-  const handleUploadAndAnalyze = () => {
-    if (file) {
-      setIsProcessing(true);
-      setIsFileAnalyzed(false);
-      setParsedData(null);
-      // Process the file only when Upload & Analyze is clicked
-      worker?.postMessage({ type: 'PROCESS_FILE', payload: { file } });
-      setIsFileAnalyzed(true);
-    }
-  };
+  const analyzeFile = (file: File) => {
+    setIsProcessing(true);
+    setError(null);
+    setParsedData(null);
+    setMetricColumn('');
+    setGroupingColumn('');
+    setAvailableGroups([]);
+    setControlGroup('');
+    setTreatmentGroups([]);
 
-  const validatePairedTTest = (data: Record<string, any>[], metricCol: string, groupingCol: string, pairingCol: string): { 
-    isValid: boolean; 
-    error: string | null;
-    warning: string | null;
-    validPairs: Record<string, any[]>;
-  } => {
-    // 1. Validate Metric Column
-    const metricValidation = validateMetricColumn(data, metricCol);
-    if (!metricValidation.isValid) {
-      return {
-        isValid: false,
-        error: metricValidation.error,
-        warning: null,
-        validPairs: {}
-      };
-    }
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      const text = e.target?.result;
+      if (typeof text === 'string') {
+        try {
+          const results = Papa.parse(text, {
+            header: true,
+            dynamicTyping: true,
+            skipEmptyLines: true
+          });
 
-    // 2. Validate Grouping Column
-    const groupValidation = validateGroupingColumn(data, groupingCol);
-    if (!groupValidation.isValid) {
-      return {
-        isValid: false,
-        error: groupValidation.error,
-        warning: null,
-        validPairs: {}
-      };
-    }
+          if (results.errors.length > 0) {
+            setError(`Error parsing CSV file: ${results.errors[0].message}`);
+            setIsProcessing(false);
+            return;
+          }
 
-    // 3. Validate Pairing
-    const pairingValidation = validatePairing(data, pairingCol, groupingCol, groupValidation.groups);
-    
-    return {
-      isValid: pairingValidation.isValid,
-      error: pairingValidation.error,
-      warning: pairingValidation.warning,
-      validPairs: pairingValidation.validPairs
+          setParsedData({
+            data: results.data as Record<string, any>[],
+            columns: results.meta.fields || []
+          });
+          setIsFileAnalyzed(true);
+          setIsProcessing(false);
+        } catch (err) {
+          setError(`Error processing file: ${err instanceof Error ? err.message : 'Unknown error'}`);
+          setIsProcessing(false);
+        }
+      }
     };
-  };
 
-  // Helper validation functions
-  const validateMetricColumn = (data: Record<string, any>[], metricCol: string) => {
-    // Check if column exists
-    if (!data[0]?.hasOwnProperty(metricCol)) {
-      return {
-        isValid: false,
-        error: "Metric column not found in the dataset."
-      };
-    }
-
-    // Check for numerical values
-    const nonNumericRows = data.filter(row => {
-      const value = row[metricCol];
-      return typeof value !== 'number' && (isNaN(Number(value)) || value === '' || value === null);
-    });
-
-    if (nonNumericRows.length > 0) {
-      return {
-        isValid: false,
-        error: `Metric column must contain only numerical values. Found ${nonNumericRows.length} non-numeric values. Examples of valid metrics include revenue, scores, session time, conversion rates, etc.`
-      };
-    }
-
-    return { isValid: true, error: null };
-  };
-
-  const validateGroupingColumn = (data: Record<string, any>[], groupingCol: string) => {
-    // Check if column exists
-    if (!data[0]?.hasOwnProperty(groupingCol)) {
-      return {
-        isValid: false,
-        error: "Grouping column not found in the dataset.",
-        groups: []
-      };
-    }
-
-    // Get unique groups
-    const uniqueGroups = Array.from(new Set(data.map(row => row[groupingCol])))
-      .filter(group => group !== null && group !== undefined);
-
-    if (uniqueGroups.length < 2) {
-      return {
-        isValid: false,
-        error: "The grouping column must contain exactly two groups (e.g., 'before' and 'after', or 'test' and 'control'). Found only one or no groups.",
-        groups: uniqueGroups
-      };
-    }
-
-    if (uniqueGroups.length > 2) {
-      return {
-        isValid: false,
-        error: `The grouping column must contain exactly two groups. Found ${uniqueGroups.length} groups: ${uniqueGroups.join(', ')}. Please ensure you're comparing exactly two conditions.`,
-        groups: uniqueGroups
-      };
-    }
-
-    return {
-      isValid: true,
-      error: null,
-      groups: uniqueGroups
+    reader.onerror = () => {
+      setError('Error reading file');
+      setIsProcessing(false);
     };
+
+    reader.readAsText(file);
   };
 
-  const validatePairing = (data: Record<string, any>[], pairingCol: string, groupingCol: string, groups: any[]) => {
-    // Check if column exists
-    if (!data[0]?.hasOwnProperty(pairingCol)) {
-      return {
-        isValid: false,
-        error: "Pairing key column not found in the dataset.",
-        warning: null,
-        validPairs: {}
-      };
-    }
+  const calculateLeveneStatistic = (group1: number[], group2: number[]): number => {
+    const group1Mean = jStatTyped.mean(group1);
+    const group2Mean = jStatTyped.mean(group2);
 
-    // Group data by pairing key
-    const pairs: Record<string, any[]> = {};
-    data.forEach(row => {
-      const pairKey = row[pairingCol];
-      if (pairKey === null || pairKey === undefined || pairKey === '') {
-        return; // Skip empty pairing keys
-      }
-      if (!pairs[pairKey]) {
-        pairs[pairKey] = [];
-      }
-      pairs[pairKey].push(row);
-    });
+    const group1Deviations = group1.map(x => Math.abs(x - group1Mean));
+    const group2Deviations = group2.map(x => Math.abs(x - group2Mean));
 
-    // Validate pairs
-    const validPairs: Record<string, any[]> = {};
-    let incompletePairs = 0;
-    let invalidPairs = 0;
-    let skippedPairs = 0;
+    const allDeviations = [...group1Deviations, ...group2Deviations];
+    const overallMean = jStatTyped.mean(allDeviations);
 
-    Object.entries(pairs).forEach(([key, rows]) => {
-      if (rows.length !== 2) {
-        incompletePairs++;
-        return;
-      }
+    const n1 = group1.length;
+    const n2 = group2.length;
+    const N = n1 + n2;
 
-      const group1 = rows[0][groupingCol];
-      const group2 = rows[1][groupingCol];
+    const group1DevSum = group1Deviations.reduce((sum, x) => sum + Math.pow(x - overallMean, 2), 0);
+    const group2DevSum = group2Deviations.reduce((sum, x) => sum + Math.pow(x - overallMean, 2), 0);
 
-      if (group1 === group2) {
-        invalidPairs++;
-        return;
-      }
+    const numerator = ((N - 2) * (n1 * Math.pow(jStatTyped.mean(group1Deviations) - overallMean, 2) + 
+                                  n2 * Math.pow(jStatTyped.mean(group2Deviations) - overallMean, 2)));
+    const denominator = (group1DevSum + group2DevSum);
 
-      if (!groups.includes(group1) || !groups.includes(group2)) {
-        skippedPairs++;
-        return;
-      }
-
-      validPairs[key] = rows;
-    });
-
-    const totalPairs = Object.keys(pairs).length;
-    const validPairsCount = Object.keys(validPairs).length;
-
-    if (validPairsCount === 0) {
-      return {
-        isValid: false,
-        error: `No valid pairs found out of ${totalPairs} total pairs. Each individual (identified by the pairing key) must appear exactly once in each group.`,
-        warning: null,
-        validPairs: {}
-      };
-    }
-
-    // Generate warning message if some pairs were invalid
-    let warning = null;
-    if (incompletePairs > 0 || invalidPairs > 0 || skippedPairs > 0) {
-      const warnings = [];
-      if (incompletePairs > 0) {
-        warnings.push(`${incompletePairs} incomplete pairs (not present in both groups)`);
-      }
-      if (invalidPairs > 0) {
-        warnings.push(`${invalidPairs} invalid pairs (same group)`);
-      }
-      if (skippedPairs > 0) {
-        warnings.push(`${skippedPairs} skipped pairs (invalid group values)`);
-      }
-      warning = `Warning: Found ${warnings.join(', ')} out of ${totalPairs} total pairs. These pairs will be excluded from the analysis. Proceeding with ${validPairsCount} valid pairs.`;
-    }
-
-    return {
-      isValid: true,
-      error: null,
-      warning,
-      validPairs
-    };
+    return numerator / denominator;
   };
 
-  return (
-    <Box sx={{ p: 3 }}>
-      <Paper elevation={3} sx={{ p: 3 }}>
-        <Typography variant="h5" gutterBottom>
-          T-Test Analysis
+  const calculateLevenePValue = (leveneStatistic: number, group1: number[], group2: number[]): number => {
+    const df1 = 1;
+    const df2 = group1.length + group2.length - 2;
+    return 1 - jStatTyped.centralF.cdf(leveneStatistic, df1, df2);
+  };
+
+  const renderSingleTestResult = (testResult: PairwiseComparison) => {
+    return (
+      <Box sx={{ mb: 3 }}>
+        <Typography variant="h6">
+          {testResult.treatmentGroup} vs {testResult.controlGroup}
         </Typography>
-
-        {error && (
-          <Alert severity="error" sx={{ mb: 2 }}>
-            {error}
-          </Alert>
+        
+        {testResult.leveneTest.pValue !== undefined && (
+          <>
+            <Typography variant="subtitle1" color="text.secondary">
+              Variance Test (Levene's):
+            </Typography>
+            <Typography>
+              p-value: {testResult.leveneTest.pValue.toFixed(4)}
+              <br />
+              Conclusion: {testResult.leveneTest.equalVariance ? 'Equal variances' : 'Unequal variances'}
+              <br />
+              Test used: {testResult.leveneTest.testUsed}
+            </Typography>
+          </>
         )}
 
-        <UploadArea
-          onDrop={handleDrop}
-          onDragOver={handleDragOver}
-        >
-          {file ? (
+        <Typography variant="subtitle1" color="text.secondary" sx={{ mt: 2 }}>
+          Group Statistics:
+        </Typography>
+        {Object.entries(testResult.groupStats).map(([group, stats]) => (
+          <Typography key={group}>
+            {group}:
+            <br />
+            Mean: {stats.mean.toFixed(4)}
+            <br />
+            Std Dev: {stats.stdDev.toFixed(4)}
+            <br />
+            Sample Size: {stats.sampleSize}
+          </Typography>
+        ))}
+
+        <Typography variant="subtitle1" color="text.secondary" sx={{ mt: 2 }}>
+          T-Test Results:
+        </Typography>
+        <Typography>
+          t-statistic: {testResult.tStatistic.toFixed(4)}
+          <br />
+          Degrees of freedom: {testResult.degreesOfFreedom.toFixed(2)}
+          <br />
+          p-value: {testResult.pValue.toFixed(4)}
+          <br />
+          {testResult.adjustedAlpha !== undefined && (
             <>
-              <Typography color="primary" gutterBottom>
-                {file.name}
-              </Typography>
-              <Button
-                component="label"
-                variant="outlined"
-                startIcon={<CloudUploadIcon />}
-                sx={{ mb: 1 }}
-              >
-                Choose Different File
-                <VisuallyHiddenInput
-                  type="file"
-                  accept=".csv"
-                  onChange={handleFileSelect}
-                  ref={fileInputRef}
-                />
-              </Button>
-              <Button
-                variant="contained"
-                color="primary"
-                onClick={handleUploadAndAnalyze}
-                disabled={isProcessing}
-                startIcon={isProcessing ? <CircularProgress size={20} /> : <FileUploadIcon />}
-              >
-                {isProcessing ? 'Processing...' : 'Upload and Analyze'}
-              </Button>
-            </>
-          ) : (
-            <>
-              <Typography color="text.secondary" gutterBottom>
-                Drag and drop a CSV file here, or click the button below
-              </Typography>
-              <Button
-                component="label"
-                variant="contained"
-                startIcon={<CloudUploadIcon />}
-              >
-                Select CSV File
-                <VisuallyHiddenInput
-                  type="file"
-                  accept=".csv"
-                  onChange={handleFileSelect}
-                />
-              </Button>
+              Bonferroni-adjusted α: {testResult.adjustedAlpha.toFixed(4)}
+              <br />
             </>
           )}
-        </UploadArea>
+          Conclusion: {testResult.conclusion}
+        </Typography>
 
-        {/* Only show the form if we have parsed data and the file has been analyzed */}
-        {parsedData && isFileAnalyzed && (
-          <Grid container spacing={3}>
-            <Grid item xs={12} md={6}>
-              <FormControl fullWidth>
-                <InputLabel>Test Type</InputLabel>
-                <Select
-                  value={testType}
-                  onChange={(e) => {
-                    setTestType(e.target.value as string);
-                    // Reset group selection when test type changes
-                    setGroupingColumn('');
-                    setPairingKey('');
-                    setAvailableGroups([]);
-                    setSelectedGroups([]);
-                    setShowGroupSelection(false);
-                    setGroupSelectionError(null);
-                  }}
-                  label="Test Type"
-                >
-                  <MenuItem value="independent">Independent T-Test</MenuItem>
-                  <MenuItem value="paired">Paired T-Test</MenuItem>
-                  <MenuItem value="one-sample">One-Sample T-Test</MenuItem>
-                </Select>
-              </FormControl>
-            </Grid>
+        <Typography variant="body1" sx={{ mt: 2 }}>
+          {testResult.interpretation}
+        </Typography>
+      </Box>
+    );
+  };
 
-            <Grid item xs={12} md={6}>
-              <FormControl fullWidth>
-                <InputLabel>Metric Column</InputLabel>
-                <Select
-                  value={metricColumn}
-                  onChange={(e) => setMetricColumn(e.target.value as string)}
-                  label="Metric Column"
-                >
-                  {parsedData.columns.length === 0 ? (
-                    <MenuItem value="" disabled>
-                      No columns available
-                    </MenuItem>
-                  ) : (
-                    parsedData.columns.map((col) => (
-                      <MenuItem key={col} value={col}>
-                        {col}
-                      </MenuItem>
-                    ))
-                  )}
-                </Select>
-              </FormControl>
-            </Grid>
+  const renderTestResults = () => {
+    if (!result) return null;
 
-            {testType !== 'one-sample' && (
-              <Grid item xs={12} md={6}>
-                <FormControl fullWidth>
-                  <InputLabel>Grouping Column</InputLabel>
-                  <Select
-                    value={groupingColumn}
-                    onChange={(e) => {
-                      const selectedCol = e.target.value as string;
-                      setGroupingColumn(selectedCol);
-                      setSelectedGroups([]); // Clear selected groups on column change
-                      setGroupSelectionError(null); // Clear error
+    return (
+      <Paper sx={{ p: 3, mt: 3, bgcolor: '#ffffff' }}>
+        <Typography variant="h5" gutterBottom sx={{ color: '#1976d2', mb: 3 }}>
+          Analysis Results
+        </Typography>
 
-                      if (testType === 'independent' && parsedData) {
-                        const uniqueGroups = Array.from(new Set(parsedData.data.map(row => row[selectedCol]))).filter(group => group !== null && group !== undefined) as string[];
-                        setAvailableGroups(uniqueGroups);
-                        if (uniqueGroups.length > 2) {
-                          setShowGroupSelection(true);
-                        } else {
-                          setShowGroupSelection(false);
-                          if (uniqueGroups.length === 2) {
-                             setSelectedGroups(uniqueGroups); // Auto-select if exactly two groups
-                          } else if (uniqueGroups.length < 2) {
-                             setGroupSelectionError('Grouping column must contain at least two unique values for Independent T-Test.');
-                          }
-                        }
-                      } else {
-                         setAvailableGroups([]);
-                         setShowGroupSelection(false);
-                         setGroupSelectionError(null);
-                      }
-                    }}
-                    label="Grouping Column"
-                  >
-                    {parsedData.columns.length === 0 ? (
-                      <MenuItem value="" disabled>
-                        No columns available
-                      </MenuItem>
-                    ) : (
-                      parsedData.columns.map((col) => (
-                        <MenuItem key={col} value={col}>
-                          {col}
-                        </MenuItem>
-                      ))
-                    )}
-                  </Select>
-                </FormControl>
-              </Grid>
-            )}
-
-            {/* New group selection dropdown for Independent T-Test */}
-            {testType === 'independent' && showGroupSelection && (
-              <Grid item xs={12} md={6}>
-                <FormControl fullWidth error={!!groupSelectionError}>
-                  <InputLabel>Select first group</InputLabel>
-                  <Select
-                    value={selectedGroups[0] || ''}
-                    onChange={(e) => {
-                      const value = e.target.value as string;
-                      setSelectedGroups([value, selectedGroups[1] || '']);
-                      setGroupSelectionError(null);
-                    }}
-                    label="Select first group"
-                  >
-                    {availableGroups.map((group) => (
-                      <MenuItem key={group} value={group}>
-                        {group}
-                      </MenuItem>
-                    ))}
-                  </Select>
-                </FormControl>
-              </Grid>
-            )}
-
-            {testType === 'independent' && showGroupSelection && (
-              <Grid item xs={12} md={6}>
-                <FormControl fullWidth error={!!groupSelectionError}>
-                  <InputLabel>Select second group</InputLabel>
-                  <Select
-                    value={selectedGroups[1] || ''}
-                    onChange={(e) => {
-                      const value = e.target.value as string;
-                      setSelectedGroups([selectedGroups[0] || '', value]);
-                      setGroupSelectionError(null);
-                    }}
-                    label="Select second group"
-                  >
-                    {availableGroups.map((group) => (
-                      <MenuItem key={group} value={group}>
-                        {group}
-                      </MenuItem>
-                    ))}
-                  </Select>
-                </FormControl>
-              </Grid>
-            )}
-
-            {testType === 'paired' && (
-              <Grid item xs={12} md={6}>
-                <FormControl fullWidth>
-                  <InputLabel>Pairing Key</InputLabel>
-                  <Select
-                    value={pairingKey}
-                    onChange={(e) => setPairingKey(e.target.value as string)}
-                    label="Pairing Key"
-                  >
-                    {parsedData.columns.length === 0 ? (
-                      <MenuItem value="" disabled>
-                        No columns available
-                      </MenuItem>
-                    ) : (
-                      parsedData.columns.map((col) => (
-                        <MenuItem key={col} value={col}>
-                          {col}
-                        </MenuItem>
-                      ))
-                    )}
-                  </Select>
-                </FormControl>
-              </Grid>
-            )}
-
-            {testType === 'one-sample' && (
-              <Grid item xs={12} md={6}>
-                <TextField
-                  fullWidth
-                  type="number"
-                  label="Population Mean"
-                  value={populationMean}
-                  onChange={(e) => setPopulationMean(Number(e.target.value))}
-                />
-              </Grid>
-            )}
-
-            <Grid item xs={12} md={6}>
-              <FormControl fullWidth>
-                <InputLabel>Significance Level (α)</InputLabel>
-                <Select
-                  value={significanceLevel}
-                  onChange={(e) => setSignificanceLevel(Number(e.target.value))}
-                  label="Significance Level (α)"
-                >
-                  <MenuItem value={0.01}>1% (α = 0.01)</MenuItem>
-                  <MenuItem value={0.05}>5% (α = 0.05)</MenuItem>
-                  <MenuItem value={0.1}>10% (α = 0.1)</MenuItem>
-                </Select>
-              </FormControl>
-            </Grid>
-
-            <Grid item xs={12}>
-              <Button
-                variant="contained"
-                color="primary"
-                onClick={handlePerformTest}
-                disabled={isProcessing || !metricColumn || 
-                          (testType === 'independent' && (!groupingColumn || (showGroupSelection && selectedGroups.length !== 2) || (!showGroupSelection && availableGroups.length !== 2))) ||
-                          (testType === 'one-sample' && (populationMean === undefined || populationMean === null)) ||
-                          (testType === 'paired' && !pairingKey) ||
-                          !!error || !!groupSelectionError
-                         }
-              >
-                Perform Test
-              </Button>
-            </Grid>
-          </Grid>
-        )}
-
-        {isProcessing ? (
-          <Box sx={{ display: 'flex', justifyContent: 'center', mt: 3 }}>
-            <CircularProgress />
-          </Box>
-        ) : result && (
-          <Box sx={{ mt: 3 }}>
-            <Typography variant="h6" gutterBottom>
-              Test Results
+        {/* Test Overview */}
+        <Box sx={{ mb: 3, p: 2, bgcolor: '#f8f9fa', borderRadius: 1 }}>
+          <Typography variant="h6" gutterBottom sx={{ color: '#1976d2' }}>
+            Test Configuration
+          </Typography>
+          <Typography variant="subtitle1">
+            <strong>Test Type:</strong> {result.testType}
+            <br />
+            <strong>Metric Type:</strong> {result.metricType}
+          </Typography>
+          
+          {/* Bonferroni Correction Details */}
+          <Box sx={{ mt: 2 }}>
+            <Typography variant="subtitle1" sx={{ fontWeight: 'bold', color: '#2e7d32' }}>
+              Multiple Comparison Correction
             </Typography>
-            
-            <Grid container spacing={2}>
-              <Grid item xs={12}>
-                <Typography>
-                  <strong>Test Type:</strong> {result.testType}
-                </Typography>
-                <Typography>
-                  <strong>Metric Type:</strong> {result.metricType}
-                </Typography>
-                {result.testType === 'One-Sample T-Test' && (
-                  <>
-                    <Typography>
-                      <strong>Null Hypothesis (H₀):</strong> Population mean (μ) = {result.populationMean}
-                    </Typography>
-                    <Typography>
-                      <strong>Alternative Hypothesis (H₁):</strong> Population mean (μ) ≠ {result.populationMean}
-                    </Typography>
-                    <Typography>
-                      <strong>Sample Mean (x̄):</strong> {result.groupStats['Sample'].mean.toFixed(4)}
-                    </Typography>
-                    <Typography>
-                      <strong>Sample Standard Deviation (s):</strong> {result.groupStats['Sample'].stdDev.toFixed(4)}
-                    </Typography>
-                    <Typography>
-                      <strong>Sample Size (n):</strong> {result.groupStats['Sample'].sampleSize}
-                    </Typography>
-                    <Typography>
-                      <strong>Standard Error (SE):</strong> {result.standardError?.toFixed(4)}
-                    </Typography>
-                    <Typography>
-                      <strong>T-statistic:</strong> {result.tStatistic.toFixed(4)}
-                    </Typography>
-                    <Typography>
-                      <strong>Degrees of Freedom (df):</strong> {result.degreesOfFreedom}
-                    </Typography>
-                    <Typography>
-                      <strong>P-value:</strong> {result.pValue.toFixed(4)}
-                    </Typography>
-                    <Typography>
-                      <strong>95% Confidence Interval:</strong> ({result.confidenceInterval?.lower.toFixed(4)}, {result.confidenceInterval?.upper.toFixed(4)})
-                    </Typography>
-                  </>
-                )}
-                {result.equalVariance !== undefined && (
-                  <>
-                    <Typography>
-                      <strong>Equal Variance:</strong> {result.equalVariance ? 'Yes' : 'No'}
-                    </Typography>
-                    <Typography>
-                      <strong>Levene's p-value:</strong> {result.levenePValue?.toFixed(4)}
-                    </Typography>
-                  </>
-                )}
-              </Grid>
+            <Typography>
+              <strong>Original Significance Level (α):</strong> {result.significanceLevel.toFixed(4)}
+              <br />
+              <strong>Number of Comparisons (k):</strong> {result.numberOfComparisons}
+              <br />
+              <strong>Bonferroni-adjusted α:</strong> {result.adjustedAlpha.toFixed(4)}
+              <Typography variant="body2" sx={{ mt: 1, fontStyle: 'italic' }}>
+                Note: To control the family-wise error rate, each comparison's p-value will be compared 
+                against the Bonferroni-adjusted α (original α ÷ number of comparisons).
+              </Typography>
+            </Typography>
+          </Box>
+        </Box>
 
-              <Grid item xs={12}>
-                <Typography variant="subtitle1" gutterBottom>
-                  Group Statistics
+        {/* Individual Comparisons */}
+        {result.comparisons.map((comparison, index) => (
+          <Box key={index} sx={{ mt: 4, p: 2, border: '1px solid #e0e0e0', borderRadius: 1 }}>
+            <Typography variant="h6" gutterBottom sx={{ color: '#1976d2' }}>
+              Comparison {index + 1}: {comparison.controlGroup} vs {comparison.treatmentGroup}
+            </Typography>
+
+            {/* Part 1: Variance Comparison */}
+            {comparison.leveneTest.pValue !== undefined && (
+              <Box sx={{ mt: 2, mb: 3 }}>
+                <Typography variant="h6" sx={{ color: '#2e7d32', mb: 1 }}>
+                  1. Variance Comparison (Levene's Test)
                 </Typography>
-                {Object.entries(result.groupStats).map(([group, stats]) => (
-                  <Box key={group} sx={{ mb: 1 }}>
+                <Box sx={{ pl: 2 }}>
+                  <Typography>
+                    <strong>Null Hypothesis (H₀):</strong> The groups have equal variances
+                    <br />
+                    <strong>Alternative Hypothesis (H₁):</strong> The groups have unequal variances
+                    <br />
+                    <strong>Levene's Test p-value:</strong> {comparison.leveneTest.pValue.toFixed(4)}
+                    <br />
+                    <strong>Comparison:</strong> {comparison.leveneTest.pValue > result.significanceLevel ? 
+                      `p-value (${comparison.leveneTest.pValue.toFixed(4)}) > α (${result.significanceLevel.toFixed(4)})` :
+                      `p-value (${comparison.leveneTest.pValue.toFixed(4)}) ≤ α (${result.significanceLevel.toFixed(4)})`}
+                    <br />
+                    <strong>Conclusion:</strong> {comparison.leveneTest.equalVariance ? 
+                      'Equal variances (Using Student\'s t-test)' : 
+                      'Unequal variances (Using Welch\'s t-test)'}
+                  </Typography>
+                </Box>
+              </Box>
+            )}
+
+            {/* Part 2: Test Results */}
+            <Box sx={{ mt: 3 }}>
+              <Typography variant="h6" sx={{ color: '#2e7d32', mb: 1 }}>
+                2. {comparison.testType} Results
+              </Typography>
+              
+              <Box sx={{ pl: 2 }}>
+                {/* Group Statistics */}
+                <Typography variant="subtitle1" sx={{ fontWeight: 'bold', mt: 2 }}>
+                  Group Statistics:
+                </Typography>
+                {Object.entries(comparison.groupStats).map(([group, stats]) => (
+                  <Box key={group} sx={{ pl: 2, mb: 1 }}>
                     <Typography>
-                      <strong>{group}:</strong> Mean = {stats.mean.toFixed(4)}, 
-                      Std Dev = {stats.stdDev.toFixed(4)}, 
-                      n = {stats.sampleSize}
+                      <strong>{group}:</strong>
+                      <br />
+                      Mean: {stats.mean.toFixed(4)}
+                      <br />
+                      Standard Deviation: {stats.stdDev.toFixed(4)}
+                      <br />
+                      Sample Size: {stats.sampleSize}
                     </Typography>
                   </Box>
                 ))}
-              </Grid>
 
-              <Grid item xs={12}>
-                <Typography variant="subtitle1" gutterBottom>
-                  T-Test Results
+                {/* Test Statistics */}
+                <Typography variant="subtitle1" sx={{ fontWeight: 'bold', mt: 2 }}>
+                  Test Statistics:
                 </Typography>
-                <Typography>
-                  <strong>T-statistic:</strong> {result.tStatistic.toFixed(4)}
-                </Typography>
-                <Typography>
-                  <strong>Degrees of Freedom:</strong> {result.degreesOfFreedom.toFixed(2)}
-                </Typography>
-                <Typography>
-                  <strong>P-value:</strong> {result.pValue.toFixed(4)}
-                </Typography>
-                <Typography>
-                  <strong>Confidence Level:</strong> {(result.confidenceLevel * 100).toFixed(1)}%
-                </Typography>
-                <Typography>
-                  <strong>Conclusion:</strong> {result.conclusion}
-                </Typography>
-                <Typography sx={{ mt: 1 }}>
-                  <strong>Interpretation:</strong> {result.interpretation}
-                </Typography>
-              </Grid>
-
-              {result.testType === 'Paired T-Test' && (
-                <Grid item xs={12}>
+                <Box sx={{ pl: 2 }}>
                   <Typography>
-                    <strong>Mean Difference:</strong> {result.meanDifference?.toFixed(4)}
+                    <strong>t-statistic:</strong> {comparison.tStatistic.toFixed(4)}
+                    <br />
+                    <strong>Degrees of Freedom:</strong> {comparison.degreesOfFreedom.toFixed(2)}
+                    <br />
+                    <strong>p-value:</strong> {comparison.pValue.toFixed(4)}
+                    {comparison.adjustedAlpha !== undefined && (
+                      <>
+                        <br />
+                        <strong>Bonferroni-adjusted α:</strong> {comparison.adjustedAlpha.toFixed(4)}
+                      </>
+                    )}
+                  </Typography>
+                </Box>
+
+                {/* Confidence Interval */}
+                {comparison.confidenceInterval && (
+                  <Box sx={{ mt: 2 }}>
+                    <Typography variant="subtitle1" sx={{ fontWeight: 'bold' }}>
+                      95% Confidence Interval:
+                    </Typography>
+                    <Typography sx={{ pl: 2 }}>
+                      ({comparison.confidenceInterval.lower.toFixed(4)}, {comparison.confidenceInterval.upper.toFixed(4)})
+                    </Typography>
+                  </Box>
+                )}
+
+                {/* Final Conclusion */}
+                <Box sx={{ mt: 3, bgcolor: '#f5f5f5', p: 2, borderRadius: 1 }}>
+                  <Typography variant="subtitle1" sx={{ fontWeight: 'bold' }}>
+                    Final Conclusion (with Bonferroni Correction):
                   </Typography>
                   <Typography>
-                    <strong>Standard Deviation of Differences:</strong> {result.stdDevDifference?.toFixed(4)}
+                    <strong>Comparison:</strong> p-value ({comparison.pValue.toFixed(4)}) {' '}
+                    {comparison.pValue < comparison.adjustedAlpha ? '<' : '≥'} {' '}
+                    Bonferroni-adjusted α ({comparison.adjustedAlpha.toFixed(4)})
+                  </Typography>
+                  <Typography sx={{ mt: 1 }}>
+                    <strong>Decision:</strong> {comparison.conclusion}
+                  </Typography>
+                  <Typography sx={{ mt: 1 }}>
+                    <strong>Interpretation:</strong> {comparison.interpretation}
+                  </Typography>
+                </Box>
+              </Box>
+            </Box>
+          </Box>
+        ))}
+      </Paper>
+    );
+  };
+
+  const renderTestDetails = () => {
+    if (!result || result.comparisons.length === 0) return null;
+    const currentResult = result.comparisons[0];
+
+    return (
+      <Grid container spacing={3}>
+        <Grid item xs={12}>
+          <Typography>
+            <strong>Test Type:</strong> {result.testType}
+          </Typography>
+          <Typography>
+            <strong>Metric Type:</strong> {result.metricType}
+          </Typography>
+          {result.testType === 'One-Sample T-Test' && (
+            <>
+              <Typography>
+                <strong>Null Hypothesis (H₀):</strong> Population mean (μ) = {currentResult.groupStats['Sample'].mean.toFixed(4)}
+              </Typography>
+              <Typography>
+                <strong>Alternative Hypothesis (H₁):</strong> Population mean (μ) ≠ {currentResult.groupStats['Sample'].mean.toFixed(4)}
+              </Typography>
+              <Typography>
+                <strong>Sample Mean (x̄):</strong> {currentResult.groupStats['Sample'].mean.toFixed(4)}
+              </Typography>
+              <Typography>
+                <strong>Sample Standard Deviation (s):</strong> {currentResult.groupStats['Sample'].stdDev.toFixed(4)}
+              </Typography>
+              <Typography>
+                <strong>Sample Size (n):</strong> {currentResult.groupStats['Sample'].sampleSize}
+              </Typography>
+              {currentResult.confidenceInterval && (
+                <Typography>
+                  <strong>95% Confidence Interval:</strong> ({currentResult.confidenceInterval.lower.toFixed(4)}, {currentResult.confidenceInterval.upper.toFixed(4)})
+                </Typography>
+              )}
+            </>
+          )}
+          {currentResult.leveneTest.equalVariance !== undefined && (
+            <>
+              <Typography>
+                <strong>Equal Variance:</strong> {currentResult.leveneTest.equalVariance ? 'Yes' : 'No'}
+              </Typography>
+              <Typography>
+                <strong>Levene's p-value:</strong> {currentResult.leveneTest.pValue.toFixed(4)}
+              </Typography>
+            </>
+          )}
+
+          <Typography variant="h6" sx={{ mt: 2 }}>
+            Group Statistics
+          </Typography>
+          {Object.entries(currentResult.groupStats).map(([group, stats]) => (
+            <Box key={group} sx={{ mb: 1 }}>
+              <Typography>
+                <strong>{group}:</strong>
+                <br />
+                Mean: {stats.mean.toFixed(4)}
+                <br />
+                Standard Deviation: {stats.stdDev.toFixed(4)}
+                <br />
+                Sample Size: {stats.sampleSize}
+              </Typography>
+            </Box>
+          ))}
+
+          <Typography variant="h6" sx={{ mt: 2 }}>
+            Test Results
+          </Typography>
+          <Typography>
+            <strong>T-statistic:</strong> {currentResult.tStatistic.toFixed(4)}
+          </Typography>
+          <Typography>
+            <strong>Degrees of Freedom:</strong> {currentResult.degreesOfFreedom.toFixed(2)}
+          </Typography>
+          <Typography>
+            <strong>P-value:</strong> {currentResult.pValue.toFixed(4)}
+          </Typography>
+          <Typography>
+            <strong>Confidence Level:</strong> {(significanceLevel * 100).toFixed(1)}%
+          </Typography>
+          <Typography>
+            <strong>Conclusion:</strong> {currentResult.conclusion}
+          </Typography>
+          <Typography sx={{ mt: 1 }}>
+            <strong>Interpretation:</strong> {currentResult.interpretation}
+          </Typography>
+
+          {currentResult.testType === 'Paired T-Test' && currentResult.meanDifference !== undefined && currentResult.stdDevDifference !== undefined && (
+            <Grid item xs={12}>
+              <Typography>
+                <strong>Mean Difference:</strong> {currentResult.meanDifference.toFixed(4)}
+              </Typography>
+              <Typography>
+                <strong>Standard Deviation of Differences:</strong> {currentResult.stdDevDifference.toFixed(4)}
+              </Typography>
+            </Grid>
+          )}
+        </Grid>
+      </Grid>
+    );
+  };
+
+  const renderChartData = (result: TestResult) => {
+    if (!result || !result.comparisons.length) return null;
+
+    const isBinary = result.metricType === 'binary';
+
+    return (
+      <Paper sx={{ p: 3, bgcolor: '#ffffff' }}>
+        <Typography variant="h6" gutterBottom sx={{ color: '#1976d2' }}>
+          Visual Comparison
+        </Typography>
+        
+        <Typography variant="body2" sx={{ mb: 2, color: 'text.secondary' }}>
+          {isBinary ? 
+            'Bar charts showing proportions for each group' :
+            'Box plots showing distribution of values for each group'}
+        </Typography>
+
+        {result.comparisons.map((comparison, index) => {
+          const controlStats = comparison.groupStats[comparison.controlGroup];
+          const treatmentStats = comparison.groupStats[comparison.treatmentGroup];
+
+          if (isBinary) {
+            const barData = {
+              labels: [comparison.controlGroup, comparison.treatmentGroup],
+              datasets: [{
+                label: 'Proportion',
+                data: [
+                  controlStats.mean * 100,
+                  treatmentStats.mean * 100
+                ],
+                backgroundColor: [CONTROL_GROUP_COLOR, TREATMENT_GROUP_COLOR],
+                borderColor: [CONTROL_GROUP_BORDER, TREATMENT_GROUP_BORDER],
+                borderWidth: 1
+              }]
+            };
+
+            const barOptions = {
+              responsive: true,
+              plugins: {
+                legend: {
+                  display: false
+                },
+                title: {
+                  display: true,
+                  text: `${comparison.controlGroup} vs ${comparison.treatmentGroup}`,
+                  font: {
+                    size: 14
+                  }
+                },
+                tooltip: {
+                  callbacks: {
+                    label: (context: any) => `${context.parsed.y.toFixed(1)}%`
+                  }
+                }
+              },
+              scales: {
+                y: {
+                  beginAtZero: true,
+                  max: 100,
+                  title: {
+                    display: true,
+                    text: 'Percentage (%)'
+                  }
+                }
+              }
+            };
+
+            return (
+              <Box key={index} sx={{ mt: index > 0 ? 4 : 0 }}>
+                <Box sx={{ mb: 2 }}>
+                  <Typography variant="subtitle1" sx={{ color: 'text.secondary' }}>
+                    <strong>Control Group:</strong> {comparison.controlGroup}
+                    <br />
+                    <strong>Treatment Group:</strong> {comparison.treatmentGroup}
+                  </Typography>
+                </Box>
+                <Box sx={{ height: 400 }}>
+                  <Chart type="bar" data={barData} options={barOptions} />
+                </Box>
+                <Divider sx={{ mt: 3 }} />
+              </Box>
+            );
+          } else {
+            // Box plot data structure
+            const boxplotData = {
+              labels: [comparison.controlGroup, comparison.treatmentGroup],
+              datasets: [{
+                type: 'boxplot',
+                label: 'Values Distribution',
+                data: [
+                  controlStats.values,
+                  treatmentStats.values
+                ],
+                backgroundColor: [CONTROL_GROUP_COLOR, TREATMENT_GROUP_COLOR],
+                borderColor: [CONTROL_GROUP_BORDER, TREATMENT_GROUP_BORDER],
+                borderWidth: 1,
+                outlierBackgroundColor: '#999999',
+                outlierBorderColor: '#999999',
+                itemRadius: 3,
+                order: 1
+              }]
+            };
+
+            const boxplotOptions = {
+              responsive: true,
+              plugins: {
+                legend: {
+                  display: false
+                },
+                title: {
+                  display: true,
+                  text: `${comparison.controlGroup} vs ${comparison.treatmentGroup}`,
+                  font: {
+                    size: 14
+                  }
+                },
+                tooltip: {
+                  callbacks: {
+                    label: (context: any) => {
+                      if (!context.raw) return '';
+                      const stats = calculateBoxPlotStats(context.raw);
+                      return [
+                        `Minimum: ${stats.min.toFixed(2)}`,
+                        `Q1: ${stats.q1.toFixed(2)}`,
+                        `Median: ${stats.median.toFixed(2)}`,
+                        `Q3: ${stats.q3.toFixed(2)}`,
+                        `Maximum: ${stats.max.toFixed(2)}`
+                      ];
+                    }
+                  }
+                }
+              },
+              scales: {
+                y: {
+                  title: {
+                    display: true,
+                    text: 'Values'
+                  }
+                }
+              }
+            };
+
+            return (
+              <Box key={index} sx={{ mt: index > 0 ? 4 : 0 }}>
+                <Box sx={{ mb: 2 }}>
+                  <Typography variant="subtitle1" sx={{ color: 'text.secondary' }}>
+                    <strong>Control Group:</strong> {comparison.controlGroup}
+                    <br />
+                    <strong>Treatment Group:</strong> {comparison.treatmentGroup}
+                  </Typography>
+                  <Typography variant="body2" sx={{ mt: 1, color: 'text.secondary' }}>
+                    Box plot shows: minimum, first quartile (Q1), median, third quartile (Q3), and maximum.
+                    Points outside the whiskers represent outliers.
+                  </Typography>
+                </Box>
+                <Box sx={{ height: 400 }}>
+                  <Chart type="boxplot" data={boxplotData as any} options={boxplotOptions} />
+                </Box>
+                <Divider sx={{ mt: 3 }} />
+              </Box>
+            );
+          }
+        })}
+      </Paper>
+    );
+  };
+
+  const handleSignificanceLevelChange = (event: SelectChangeEvent) => {
+    setSignificanceLevel(parseFloat(event.target.value as string));
+  };
+
+  const renderGroupSelection = () => {
+    if (!testType || testType === 'one-sample' || !parsedData) return null;
+
+    return (
+      <>
+        <Grid item xs={12} md={6}>
+          <FormControl fullWidth>
+            <InputLabel>Grouping Column</InputLabel>
+            <Select
+              value={groupingColumn}
+              onChange={handleGroupingColumnChange}
+              label="Grouping Column"
+            >
+              {parsedData.columns.map((column) => (
+                <MenuItem key={column} value={column}>
+                  {column}
+                </MenuItem>
+              ))}
+            </Select>
+          </FormControl>
+        </Grid>
+
+        {groupingColumn && availableGroups.length > 2 && (
+          <Grid item xs={12} md={6}>
+            <FormControl fullWidth>
+              <InputLabel>Control Group</InputLabel>
+              <Select
+                value={controlGroup}
+                onChange={handleControlGroupChange}
+                label="Control Group"
+              >
+                {availableGroups.map((group) => (
+                  <MenuItem key={group} value={group}>
+                    {group}
+                  </MenuItem>
+                ))}
+              </Select>
+              <FormHelperText>
+                Select a control group. Each remaining group will be compared against this group.
+              </FormHelperText>
+            </FormControl>
+          </Grid>
+        )}
+        
+        {groupingColumn && availableGroups.length === 2 && (
+          <Grid item xs={12}>
+            <Typography>
+              <strong>Control Group:</strong> {controlGroup}
+              <br />
+              <strong>Treatment Group:</strong> {treatmentGroups[0]}
+            </Typography>
+          </Grid>
+        )}
+
+        {groupingColumn && availableGroups.length > 2 && controlGroup && (
+          <Grid item xs={12}>
+            <Typography>
+              <strong>Control Group:</strong> {controlGroup}
+              <br />
+              <strong>Treatment Groups:</strong> {treatmentGroups.join(', ')}
+              <br />
+              <em>Each treatment group will be compared individually against the control group.</em>
+            </Typography>
+          </Grid>
+        )}
+      </>
+    );
+  };
+
+  return (
+    <Box sx={{ width: '100%', maxWidth: 1200, margin: '0 auto', p: 3 }}>
+      <Typography variant="h5" gutterBottom>
+        T-Test Analysis
+      </Typography>
+
+      {error && (
+        <Alert severity="error" sx={{ mb: 2 }}>
+          {error}
+        </Alert>
+      )}
+
+      <Paper sx={{ p: 3, mb: 3 }}>
+        <Grid container spacing={2}>
+          <Grid item xs={12}>
+            <Typography variant="h6" gutterBottom>
+              Upload Data
+            </Typography>
+          </Grid>
+          <Grid item xs={12}>
+            <input
+              type="file"
+              accept=".csv"
+              onChange={handleFileChange}
+              style={{ display: 'none' }}
+              ref={fileInputRef}
+            />
+            <Button
+              variant="contained"
+              onClick={() => fileInputRef.current?.click()}
+              startIcon={<CloudUploadIcon />}
+            >
+              Choose CSV File
+            </Button>
+            {file && (
+              <Typography sx={{ mt: 1 }}>
+                Selected file: {file.name}
+              </Typography>
+            )}
+          </Grid>
+        </Grid>
+      </Paper>
+
+      {parsedData && (
+        <>
+          <Box sx={{ borderBottom: 1, borderColor: 'divider', mb: 2 }}>
+            <Tabs 
+              value={tabValue} 
+              onChange={(event, newValue) => setTabValue(newValue)} 
+              aria-label="t-test tabs"
+            >
+              <Tab label="Analysis" />
+              <Tab label="Visual Comparison" />
+            </Tabs>
+          </Box>
+
+          <TabPanel value={tabValue} index={0}>
+            <Paper sx={{ p: 3, mb: 3 }}>
+              <Grid container spacing={2}>
+                <Grid item xs={12}>
+                  <Typography variant="h6" gutterBottom>
+                    Configure T-Test
                   </Typography>
                 </Grid>
-              )}
-            </Grid>
-          </Box>
-        )}
-      </Paper>
+                <Grid item xs={12} md={6}>
+                  <FormControl fullWidth>
+                    <InputLabel>Test Type</InputLabel>
+                    <Select
+                      value={testType}
+                      onChange={handleTestTypeChange}
+                      label="Test Type"
+                    >
+                      <MenuItem value="independent">Independent T-Test</MenuItem>
+                      <MenuItem value="paired">Paired T-Test</MenuItem>
+                      <MenuItem value="one-sample">One-Sample T-Test</MenuItem>
+                    </Select>
+                  </FormControl>
+                </Grid>
+                <Grid item xs={12} md={6}>
+                  <FormControl fullWidth>
+                    <InputLabel>Metric Column</InputLabel>
+                    <Select
+                      value={metricColumn}
+                      onChange={handleMetricColumnChange}
+                      label="Metric Column"
+                    >
+                      {parsedData.columns.map((col) => (
+                        <MenuItem key={col} value={col}>
+                          {col}
+                        </MenuItem>
+                      ))}
+                    </Select>
+                  </FormControl>
+                </Grid>
+                {renderGroupSelection()}
+                {testType === 'one-sample' && (
+                  <Grid item xs={12} md={6}>
+                    <TextField
+                      fullWidth
+                      type="number"
+                      label="Population Mean"
+                      value={populationMean}
+                      onChange={(event) => setPopulationMean(parseFloat(event.target.value))}
+                    />
+                  </Grid>
+                )}
+                <Grid item xs={12} md={6}>
+                  <FormControl fullWidth>
+                    <InputLabel id="significance-level-label">Significance Level (α)</InputLabel>
+                    <Select
+                      labelId="significance-level-label"
+                      value={significanceLevel.toString()}
+                      onChange={handleSignificanceLevelChange}
+                      label="Significance Level (α)"
+                    >
+                      <MenuItem value="0.01">0.01 (1%)</MenuItem>
+                      <MenuItem value="0.05">0.05 (5%)</MenuItem>
+                      <MenuItem value="0.10">0.10 (10%)</MenuItem>
+                    </Select>
+                  </FormControl>
+                </Grid>
+                <Grid item xs={12}>
+                  <Button
+                    variant="contained"
+                    onClick={handleRunTest}
+                    disabled={!isFileAnalyzed || isProcessing}
+                    startIcon={<FileUploadIcon />}
+                  >
+                    Run T-Test
+                  </Button>
+                </Grid>
+              </Grid>
+            </Paper>
+            {result && renderTestResults()}
+          </TabPanel>
+
+          <TabPanel value={tabValue} index={1}>
+            {result && renderChartData(result)}
+          </TabPanel>
+        </>
+      )}
+
+      {error && (
+        <Alert severity="error" sx={{ mt: 2 }}>
+          {error}
+        </Alert>
+      )}
+
+      {isProcessing && (
+        <Box sx={{ display: 'flex', justifyContent: 'center', mt: 2 }}>
+          <CircularProgress />
+        </Box>
+      )}
     </Box>
   );
 };
