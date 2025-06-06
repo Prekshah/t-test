@@ -210,6 +210,41 @@ interface BoxPlotData {
   outliers: number[];
 }
 
+// Function to calculate histogram bins
+const calculateHistogramBins = (data: number[], binCount = 10) => {
+  if (data.length === 0) return { bins: [], counts: [] };
+  
+  const min = Math.min(...data);
+  const max = Math.max(...data);
+  const binWidth = (max - min) / binCount;
+  
+  // Create bin edges
+  const bins = Array.from({ length: binCount + 1 }, (_, i) => min + i * binWidth);
+  
+  // Initialize counts
+  const counts = Array(binCount).fill(0);
+  
+  // Count values in each bin
+  data.forEach(value => {
+    const binIndex = Math.min(Math.floor((value - min) / binWidth), binCount - 1);
+    counts[binIndex]++;
+  });
+  
+  // Convert to percentages
+  const percentages = counts.map(count => (count / data.length) * 100);
+  
+  return {
+    bins,
+    counts: percentages,
+    binWidth
+  };
+};
+
+// Function to format bin labels
+const formatBinLabel = (value: number) => {
+  return value.toFixed(1);
+};
+
 const TTest: React.FC<TTestProps> = ({ data = [], columns = [] }) => {
   const [file, setFile] = useState<File | null>(null);
   const [parsedData, setParsedData] = useState<{ data: Record<string, any>[]; columns: string[] } | null>(null);
@@ -941,13 +976,13 @@ const TTest: React.FC<TTestProps> = ({ data = [], columns = [] }) => {
     return (
       <Paper sx={{ p: 3, bgcolor: '#ffffff' }}>
         <Typography variant="h6" gutterBottom sx={{ color: '#1976d2' }}>
-          Visual Comparison
+          Distribution Comparison
         </Typography>
         
         <Typography variant="body2" sx={{ mb: 2, color: 'text.secondary' }}>
           {isBinary ? 
             'Bar charts showing proportions for each group' :
-            'Box plots showing distribution of values for each group'}
+            'Histograms showing the distribution of values in each group'}
         </Typography>
 
         {result.comparisons.map((comparison, index) => {
@@ -1012,39 +1047,52 @@ const TTest: React.FC<TTestProps> = ({ data = [], columns = [] }) => {
                 <Box sx={{ height: 400 }}>
                   <Chart type="bar" data={barData} options={barOptions} />
                 </Box>
-                <Divider sx={{ mt: 3 }} />
               </Box>
             );
           } else {
-            // Box plot data structure
-            const boxplotData = {
-              labels: [comparison.controlGroup, comparison.treatmentGroup],
-              datasets: [{
-                type: 'boxplot',
-                label: 'Values Distribution',
-                data: [
-                  controlStats.values,
-                  treatmentStats.values
-                ],
-                backgroundColor: [CONTROL_GROUP_COLOR, TREATMENT_GROUP_COLOR],
-                borderColor: [CONTROL_GROUP_BORDER, TREATMENT_GROUP_BORDER],
-                borderWidth: 1,
-                outlierBackgroundColor: '#999999',
-                outlierBorderColor: '#999999',
-                itemRadius: 3,
-                order: 1
-              }]
+            // Calculate histogram data for both groups
+            const controlHistogram = calculateHistogramBins(controlStats.values);
+            const treatmentHistogram = calculateHistogramBins(treatmentStats.values);
+
+            // Create labels for the bins (use control group bins as reference)
+            const binLabels = controlHistogram.bins.slice(0, -1).map((binStart, i) => 
+              `${formatBinLabel(binStart)}-${formatBinLabel(controlHistogram.bins[i + 1])}`
+            );
+
+            const histogramData = {
+              labels: binLabels,
+              datasets: [
+                {
+                  label: comparison.controlGroup,
+                  data: controlHistogram.counts,
+                  backgroundColor: CONTROL_GROUP_COLOR,
+                  borderColor: CONTROL_GROUP_BORDER,
+                  borderWidth: 1,
+                  barPercentage: 0.9,
+                  categoryPercentage: 0.8
+                },
+                {
+                  label: comparison.treatmentGroup,
+                  data: treatmentHistogram.counts,
+                  backgroundColor: TREATMENT_GROUP_COLOR,
+                  borderColor: TREATMENT_GROUP_BORDER,
+                  borderWidth: 1,
+                  barPercentage: 0.9,
+                  categoryPercentage: 0.8
+                }
+              ]
             };
 
-            const boxplotOptions = {
+            const histogramOptions = {
               responsive: true,
               plugins: {
                 legend: {
-                  display: false
+                  display: true,
+                  position: 'top' as const
                 },
                 title: {
                   display: true,
-                  text: `${comparison.controlGroup} vs ${comparison.treatmentGroup}`,
+                  text: 'Value Distribution by Group',
                   font: {
                     size: 14
                   }
@@ -1052,24 +1100,23 @@ const TTest: React.FC<TTestProps> = ({ data = [], columns = [] }) => {
                 tooltip: {
                   callbacks: {
                     label: (context: any) => {
-                      if (!context.raw) return '';
-                      const stats = calculateBoxPlotStats(context.raw);
-                      return [
-                        `Minimum: ${stats.min.toFixed(2)}`,
-                        `Q1: ${stats.q1.toFixed(2)}`,
-                        `Median: ${stats.median.toFixed(2)}`,
-                        `Q3: ${stats.q3.toFixed(2)}`,
-                        `Maximum: ${stats.max.toFixed(2)}`
-                      ];
+                      return `${context.dataset.label}: ${context.parsed.y.toFixed(1)}% of values`;
                     }
                   }
                 }
               },
               scales: {
-                y: {
+                x: {
                   title: {
                     display: true,
-                    text: 'Values'
+                    text: 'Value Ranges'
+                  }
+                },
+                y: {
+                  beginAtZero: true,
+                  title: {
+                    display: true,
+                    text: 'Percentage of Values (%)'
                   }
                 }
               }
@@ -1084,14 +1131,21 @@ const TTest: React.FC<TTestProps> = ({ data = [], columns = [] }) => {
                     <strong>Treatment Group:</strong> {comparison.treatmentGroup}
                   </Typography>
                   <Typography variant="body2" sx={{ mt: 1, color: 'text.secondary' }}>
-                    Box plot shows: minimum, first quartile (Q1), median, third quartile (Q3), and maximum.
-                    Points outside the whiskers represent outliers.
+                    The histogram shows the distribution of values in each group.
+                    Each bar represents the percentage of values falling within that range.
+                    <br />
+                    <strong>Mean (Control):</strong> {controlStats.mean.toFixed(2)}
+                    <br />
+                    <strong>Mean (Treatment):</strong> {treatmentStats.mean.toFixed(2)}
+                    <br />
+                    <strong>Standard Deviation (Control):</strong> {controlStats.stdDev.toFixed(2)}
+                    <br />
+                    <strong>Standard Deviation (Treatment):</strong> {treatmentStats.stdDev.toFixed(2)}
                   </Typography>
                 </Box>
                 <Box sx={{ height: 400 }}>
-                  <Chart type="boxplot" data={boxplotData as any} options={boxplotOptions} />
+                  <Chart type="bar" data={histogramData} options={histogramOptions} />
                 </Box>
-                <Divider sx={{ mt: 3 }} />
               </Box>
             );
           }
