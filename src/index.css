@@ -5,9 +5,16 @@ body {
     sans-serif;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
+  background-color: #ffffff;
 }
 
 code {
   font-family: source-code-pro, Menlo, Monaco, Consolas, 'Courier New',
     monospace;
+}
+
+/* Add a subtle gradient to make the background more interesting */
+#root {
+  min-height: 100vh;
+  background: linear-gradient(135deg, #ffffff 0%, #f5f9ff 100%);
 }

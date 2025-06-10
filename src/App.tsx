@@ -1,12 +1,12 @@
 import React from 'react';
 import { Container, Box } from '@mui/material';
-import FileUpload from './components/FileUpload';
+import StatisticalAnalysis from './components/StatisticalAnalysis';
 
 const App: React.FC = () => {
   return (
-    <Container maxWidth="md" sx={{ py: 4 }}>
+    <Container maxWidth="lg" sx={{ py: 4 }}>
       <Box>
-        <FileUpload />
+        <StatisticalAnalysis />
       </Box>
     </Container>
   );
