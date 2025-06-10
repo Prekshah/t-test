@@ -391,6 +391,7 @@ const StatisticalAnalysis: React.FC = () => {
     const pValue = 1 - calculateFProbability(testStatistic, dfBetween, dfWithin);
     
     return {
+      W: testStatistic,  // Add the W statistic
       pValue,
       equalVariance: pValue >= 0.05
     };

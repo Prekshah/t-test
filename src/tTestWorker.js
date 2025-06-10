@@ -116,7 +116,7 @@ const levenesTest = (group1Data, group2Data) => {
     const pValue = 1 - Math.exp(-fStat);
     
     return {
-        fStatistic: fStat,
+        W: fStat,  // Rename fStatistic to W to match the interface
         pValue: pValue,
         equalVariance: pValue > 0.05
     };

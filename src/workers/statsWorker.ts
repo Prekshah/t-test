@@ -1,5 +1,5 @@
 // Worker for statistical calculations
-interface ColumnStats {
+export interface ColumnStats {
   mean: number;
   trimmedMean: number;
   skewness: number;
@@ -7,9 +7,11 @@ interface ColumnStats {
   meanDiffPercentage: number;
   count: number;
   values: number[];
+  stdDev: number;
+  sampleSize: number;
 }
 
-interface GroupStats {
+export interface GroupStats {
   [key: string]: ColumnStats;
 }
 
@@ -23,11 +25,10 @@ interface WorkerMessage {
   type: 'calculateStats' | 'calculateLeveneTest';
   data: {
     groupData?: { [key: string]: number[] };
-    values?: number[];
   };
 }
 
-// Calculate statistics for a single group
+// Calculate statistics for a numeric array
 const calculateStats = (values: number[]): ColumnStats => {
   const sorted = [...values].sort((a, b) => a - b);
   const n = values.length;
@@ -60,7 +61,9 @@ const calculateStats = (values: number[]): ColumnStats => {
     kurtosis,
     meanDiffPercentage,
     count: n,
-    values
+    values,
+    stdDev: Math.sqrt(m2),
+    sampleSize: n
   };
 };
 
