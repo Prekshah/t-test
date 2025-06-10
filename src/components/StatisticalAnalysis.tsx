@@ -34,6 +34,15 @@ interface DataRow {
   [key: string]: string | number;
 }
 
+// Types
+type StatsWorkerResponse = {
+  type: 'statsResult';
+  data: GroupStats;
+} | {
+  type: 'leveneResult';
+  data: LeveneTestResult;
+};
+
 interface ColumnStats {
   mean: number;
   trimmedMean: number;
@@ -288,7 +297,7 @@ const StatisticalAnalysis: React.FC = () => {
   const [tabValue, setTabValue] = useState(0);
   const [isCalculating, setIsCalculating] = useState(false);
   const [leveneTest, setLeveneTest] = useState<LeveneTestResult | null>(null);
-  const workerTimeoutRef = useRef<NodeJS.Timeout>();
+  const workerTimeoutRef = useRef<NodeJS.Timeout | null>(null);
 
   // F-distribution probability calculation (approximation)
   const calculateFProbability = useCallback((F: number, df1: number, df2: number): number => {
@@ -566,18 +575,12 @@ const StatisticalAnalysis: React.FC = () => {
 
   // Setup worker message handler
   useEffect(() => {
-    const handleWorkerMessage = (e: MessageEvent) => {
-      const { type, data } = e.data;
-      
-      if (type === 'statsResult') {
-        setGroupStats(data);
+    const handleWorkerMessage = (e: MessageEvent<StatsWorkerResponse>) => {
+      if (e.data.type === 'statsResult') {
+        setGroupStats(e.data.data);
         setIsCalculating(false);
-      } else if (type === 'leveneResult') {
-        setLeveneTest({
-          W: data.W,
-          pValue: data.pValue,
-          equalVariance: data.equalVariance
-        });
+      } else if (e.data.type === 'leveneResult') {
+        setLeveneTest(e.data.data);
       }
     };
 
@@ -835,7 +838,7 @@ const StatisticalAnalysis: React.FC = () => {
                                   <CircularProgress />
                                 </Box>
                               }>
-                                <HistogramPlot data={stats.values} groupName={group} />
+                                <HistogramPlotLazy data={stats.values} groupName={group} />
                               </Suspense>
                             </Paper>
                           </Grid>

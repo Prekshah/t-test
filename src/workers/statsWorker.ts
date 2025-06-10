@@ -13,6 +13,12 @@ interface GroupStats {
   [key: string]: ColumnStats;
 }
 
+interface LeveneTestResult {
+  W: number;
+  pValue: number;
+  equalVariance: boolean;
+}
+
 interface WorkerMessage {
   type: 'calculateStats' | 'calculateLeveneTest';
   data: {
@@ -59,7 +65,7 @@ const calculateStats = (values: number[]): ColumnStats => {
 };
 
 // Calculate Levene's test
-const calculateLeveneTest = (groupStats: GroupStats) => {
+const calculateLeveneTest = (groupStats: GroupStats): LeveneTestResult => {
   const groups = Object.values(groupStats);
   const groupMeans = groups.map(g => g.mean);
   const allValues = groups.flatMap(g => g.values);
