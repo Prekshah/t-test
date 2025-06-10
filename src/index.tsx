@@ -1,15 +1,26 @@
 import React from 'react';
 import ReactDOM from 'react-dom/client';
+import StatisticalAnalysis from './components/StatisticalAnalysis';
+import { CssBaseline, ThemeProvider, createTheme } from '@mui/material';
 import './index.css';
-import App from './App';
 import reportWebVitals from './reportWebVitals';
+
+const theme = createTheme({
+  palette: {
+    mode: 'light',
+  },
+});
 
 const root = ReactDOM.createRoot(
   document.getElementById('root') as HTMLElement
 );
+
 root.render(
   <React.StrictMode>
-    <App />
+    <ThemeProvider theme={theme}>
+      <CssBaseline />
+      <StatisticalAnalysis />
+    </ThemeProvider>
   </React.StrictMode>
 );
 

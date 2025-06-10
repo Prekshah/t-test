@@ -521,13 +521,15 @@ const StatisticalAnalysis: React.FC = () => {
   );
 
   // Optimized handlers
-  const handleMetricChange = useCallback((event: SelectChangeEvent<string>) => {
-    debouncedSetMetricColumn(event.target.value);
-  }, [debouncedSetMetricColumn]);
+  const handleMetricChange = (event: SelectChangeEvent<string>) => {
+    const column = event.target.value;
+    setMetricColumn(column);
+    detectColumnType(column);
+  };
 
-  const handleGroupingChange = useCallback((event: SelectChangeEvent<string>) => {
-    debouncedSetGroupingColumn(event.target.value);
-  }, [debouncedSetGroupingColumn]);
+  const handleGroupingChange = (event: SelectChangeEvent<string>) => {
+    setGroupingColumn(event.target.value);
+  };
 
   // Cleanup debounced functions
   useEffect(() => {
@@ -630,6 +632,13 @@ const StatisticalAnalysis: React.FC = () => {
       });
     }, 0);
   }, [groupingColumn, metricColumn]);
+
+  // Update statistics when metric or grouping columns change
+  useEffect(() => {
+    if (metricColumn && groupingColumn && data.length > 0) {
+      calculateGroupStats(data);
+    }
+  }, [metricColumn, groupingColumn, data, calculateGroupStats]);
 
   return (
     <Box sx={{ p: 3 }}>

@@ -1,3 +1,4 @@
+/* eslint-disable no-restricted-globals */
 // Worker for statistical calculations
 export interface ColumnStats {
   mean: number;
