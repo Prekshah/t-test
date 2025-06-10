@@ -51,6 +51,10 @@ interface ColumnStats {
   meanDiffPercentage: number;
   count: number;
   values: number[];
+  stdDev: number;
+  sampleSize: number;
+  proportion?: number;
+  proportionStdError?: number;
 }
 
 interface GroupStats {
@@ -269,9 +273,9 @@ const ReliabilityCheck: React.FC<ReliabilityCheckProps> = ({ group, stats, leven
         severity={leveneTest?.equalVariance ? "success" : "warning"}
       >
         <Typography variant="body1">
-          <strong>Variance Test Result:</strong> {leveneTest?.equalVariance ? 
-            "Variances are equal (homoscedastic)" : 
-            "Variances are unequal (heteroscedastic)"}
+          <strong>Variance Test Result (Levene's p-value = {leveneTest?.pValue.toFixed(4)}):</strong> {leveneTest?.equalVariance ? 
+            "Variances are equal" : 
+            "Variances are unequal"}
         </Typography>
       </Alert>
     </Paper>
@@ -340,7 +344,9 @@ const StatisticalAnalysis: React.FC = () => {
       kurtosis,
       meanDiffPercentage,
       count: n,
-      values
+      values,
+      stdDev: Math.sqrt(m2),
+      sampleSize: n
     };
   }, []);
 
@@ -492,17 +498,21 @@ const StatisticalAnalysis: React.FC = () => {
     }
   }, [metricColumn, groupingColumn, groupStats, isMetricContinuous, calculateLeveneTest, checkMeanReliability]);
 
-  // Detect column type with debouncing
+  // Detect if a column is continuous or proportion
   const detectColumnType = useCallback((column: string) => {
-    if (!column || !data.length) return;
+    if (!data.length || !column) return;
 
-    const values = data.map(row => parseFloat(row[column] as string))
-                      .filter(val => !isNaN(val));
-    
+    const values = data
+      .map(row => parseFloat(row[column] as string))
+      .filter(val => !isNaN(val));
+
+    if (values.length === 0) return;
+
     // Check if all values are between 0 and 1 or all values are 0/1
     const isProportionType = values.every(val => (val >= 0 && val <= 1)) &&
-                            values.some(val => val > 0);
-    
+                            values.some(val => val > 0) &&
+                            values.every(val => val === Math.round(val) || val === 0 || val === 1);
+
     setIsMetricContinuous(!isProportionType);
   }, [data]);
 
@@ -520,13 +530,14 @@ const StatisticalAnalysis: React.FC = () => {
     []
   );
 
-  // Optimized handlers
+  // Handle metric column change
   const handleMetricChange = (event: SelectChangeEvent<string>) => {
     const column = event.target.value;
     setMetricColumn(column);
     detectColumnType(column);
   };
 
+  // Handle grouping column change
   const handleGroupingChange = (event: SelectChangeEvent<string>) => {
     setGroupingColumn(event.target.value);
   };
@@ -623,15 +634,20 @@ const StatisticalAnalysis: React.FC = () => {
       
       statsWorker.postMessage({
         type: 'calculateStats',
-        data: { groupData }
+        data: { 
+          groupData,
+          isProportionMetric: !isMetricContinuous 
+        }
       });
       
-      statsWorker.postMessage({
-        type: 'calculateLeveneTest',
-        data: { groupData }
-      });
+      if (isMetricContinuous) {
+        statsWorker.postMessage({
+          type: 'calculateLeveneTest',
+          data: { groupData }
+        });
+      }
     }, 0);
-  }, [groupingColumn, metricColumn]);
+  }, [groupingColumn, metricColumn, isMetricContinuous]);
 
   // Update statistics when metric or grouping columns change
   useEffect(() => {
@@ -795,11 +811,22 @@ const StatisticalAnalysis: React.FC = () => {
                           <TableRow sx={{ backgroundColor: '#f8f9fa' }}>
                             <TableCell>Group</TableCell>
                             <TableCell>Count</TableCell>
-                            <TableCell>Mean</TableCell>
-                            <TableCell>5% Trimmed Mean</TableCell>
-                            <TableCell>Skewness</TableCell>
-                            <TableCell>Kurtosis</TableCell>
-                            <TableCell>Mean Diff %</TableCell>
+                            {isMetricContinuous ? (
+                              <>
+                                <TableCell>Mean</TableCell>
+                                <TableCell>5% Trimmed Mean</TableCell>
+                                <TableCell>Skewness</TableCell>
+                                <TableCell>Kurtosis</TableCell>
+                                <TableCell>Mean Diff %</TableCell>
+                              </>
+                            ) : (
+                              <>
+                                <TableCell>Proportion</TableCell>
+                                <TableCell>Standard Error</TableCell>
+                                <TableCell>95% CI Lower</TableCell>
+                                <TableCell>95% CI Upper</TableCell>
+                              </>
+                            )}
                           </TableRow>
                         </TableHead>
                         <TableBody>
@@ -807,11 +834,32 @@ const StatisticalAnalysis: React.FC = () => {
                             <TableRow key={group}>
                               <TableCell>{group}</TableCell>
                               <TableCell>{stats.count}</TableCell>
-                              <TableCell>{stats.mean.toFixed(3)}</TableCell>
-                              <TableCell>{stats.trimmedMean.toFixed(3)}</TableCell>
-                              <TableCell>{stats.skewness.toFixed(3)}</TableCell>
-                              <TableCell>{stats.kurtosis.toFixed(3)}</TableCell>
-                              <TableCell>{stats.meanDiffPercentage.toFixed(1)}%</TableCell>
+                              {isMetricContinuous ? (
+                                <>
+                                  <TableCell>{stats.mean.toFixed(3)}</TableCell>
+                                  <TableCell>{stats.trimmedMean.toFixed(3)}</TableCell>
+                                  <TableCell>{stats.skewness.toFixed(3)}</TableCell>
+                                  <TableCell>{stats.kurtosis.toFixed(3)}</TableCell>
+                                  <TableCell>{stats.meanDiffPercentage.toFixed(1)}%</TableCell>
+                                </>
+                              ) : (
+                                <>
+                                  <TableCell>{(stats.proportion || 0).toFixed(3)}</TableCell>
+                                  <TableCell>{(stats.proportionStdError || 0).toFixed(3)}</TableCell>
+                                  <TableCell>
+                                    {(stats.proportion && stats.proportionStdError
+                                      ? stats.proportion - 1.96 * stats.proportionStdError
+                                      : 0
+                                    ).toFixed(3)}
+                                  </TableCell>
+                                  <TableCell>
+                                    {(stats.proportion && stats.proportionStdError
+                                      ? stats.proportion + 1.96 * stats.proportionStdError
+                                      : 0
+                                    ).toFixed(3)}
+                                  </TableCell>
+                                </>
+                              )}
                             </TableRow>
                           ))}
                         </TableBody>
