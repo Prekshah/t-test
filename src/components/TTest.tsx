@@ -246,41 +246,62 @@ const formatBinLabel = (value: number) => {
 };
 
 const TTest: React.FC<TTestProps> = ({ data = [], columns = [] }) => {
+  const [tabValue, setTabValue] = useState(0);
   const [file, setFile] = useState<File | null>(null);
   const [parsedData, setParsedData] = useState<{ data: Record<string, any>[]; columns: string[] } | null>(null);
-  const [isFileAnalyzed, setIsFileAnalyzed] = useState(false);
-  const [testType, setTestType] = useState('independent');
+  const [testType, setTestType] = useState<'independent' | 'paired' | 'one-sample'>('independent');
   const [metricColumn, setMetricColumn] = useState('');
   const [groupingColumn, setGroupingColumn] = useState('');
-  const [populationMean, setPopulationMean] = useState<number>(0);
-  const [significanceLevel, setSignificanceLevel] = useState<number>(0.05);
+  const [controlGroup, setControlGroup] = useState('');
+  const [treatmentGroups, setTreatmentGroups] = useState<string[]>([]);
+  const [availableGroups, setAvailableGroups] = useState<string[]>([]);
+  const [populationMean, setPopulationMean] = useState(0);
+  const [significanceLevel, setSignificanceLevel] = useState(0.05);
   const [result, setResult] = useState<TestResult | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [isProcessing, setIsProcessing] = useState(false);
-  const [tabValue, setTabValue] = useState(0);
-  const [availableGroups, setAvailableGroups] = useState<string[]>([]);
-  const [controlGroup, setControlGroup] = useState<string>('');
-  const [treatmentGroups, setTreatmentGroups] = useState<string[]>([]);
   const [metricType, setMetricType] = useState<'continuous' | 'binary'>('continuous');
   const [chartData, setChartData] = useState<ChartData | null>(null);
+  const [inputsChanged, setInputsChanged] = useState(false); // Track if inputs have changed since last test
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const handleFileChange = (event: React.ChangeEvent<HTMLInputElement>) => {
     const files = event.target.files;
     if (files && files[0]) {
+      resetExecutionResults(); // Reset results when file changes
       setFile(files[0]);
       analyzeFile(files[0]);
     }
   };
 
-  const handleTestTypeChange = (event: SelectChangeEvent) => {
-    setTestType(event.target.value);
+  // Completely reset execution results and mark inputs as changed
+  const resetExecutionResults = () => {
     setResult(null);
+    setChartData(null);
+    setError(null);
+    setInputsChanged(true);
+  };
+
+  // Mark that test has been run and inputs are up to date
+  const markTestExecuted = () => {
+    setInputsChanged(false);
+  };
+
+  // Modify tab change handler - don't reset on tab change, only on input change
+  const handleTabChange = (event: React.SyntheticEvent, newValue: number) => {
+    setTabValue(newValue);
+  };
+
+  // Modify input change handlers to reset results and mark inputs as changed
+  const handleTestTypeChange = (event: SelectChangeEvent) => {
+    resetExecutionResults();
+    setTestType(event.target.value as 'independent' | 'paired' | 'one-sample');
     setControlGroup('');
     setTreatmentGroups([]);
   };
 
   const handleMetricColumnChange = (event: SelectChangeEvent) => {
+    resetExecutionResults();
     const column = event.target.value;
     setMetricColumn(column);
     setResult(null);
@@ -294,6 +315,7 @@ const TTest: React.FC<TTestProps> = ({ data = [], columns = [] }) => {
   };
 
   const handleGroupingColumnChange = (event: SelectChangeEvent) => {
+    resetExecutionResults();
     const column = event.target.value;
     setGroupingColumn(column);
     setResult(null);
@@ -315,10 +337,21 @@ const TTest: React.FC<TTestProps> = ({ data = [], columns = [] }) => {
   };
 
   const handleControlGroupChange = (event: SelectChangeEvent) => {
-    const selected = event.target.value;
-    setControlGroup(selected);
+    resetExecutionResults();
+    const selectedControl = event.target.value;
+    setControlGroup(selectedControl);
     // Automatically set all other groups as treatment groups
-    setTreatmentGroups(availableGroups.filter(group => group !== selected));
+    setTreatmentGroups(availableGroups.filter(group => group !== selectedControl));
+  };
+
+  const handleSignificanceLevelChange = (event: SelectChangeEvent) => {
+    resetExecutionResults();
+    setSignificanceLevel(parseFloat(event.target.value as string));
+  };
+
+  const handlePopulationMeanChange = (event: React.ChangeEvent<HTMLInputElement>) => {
+    resetExecutionResults();
+    setPopulationMean(parseFloat(event.target.value));
   };
 
   const calculateLeveneTest = (group1Values: number[], group2Values: number[]): LeveneTestResult => {
@@ -522,6 +555,7 @@ const TTest: React.FC<TTestProps> = ({ data = [], columns = [] }) => {
 
       setResult(testResult);
       updateChartData(testResult);
+      markTestExecuted(); // Mark that test has been executed with current inputs
     } catch (err) {
       setError(`Error performing test: ${err instanceof Error ? err.message : 'Unknown error'}`);
     } finally {
@@ -602,7 +636,6 @@ const TTest: React.FC<TTestProps> = ({ data = [], columns = [] }) => {
             data: results.data as Record<string, any>[],
             columns: results.meta.fields || []
           });
-          setIsFileAnalyzed(true);
           setIsProcessing(false);
         } catch (err) {
           setError(`Error processing file: ${err instanceof Error ? err.message : 'Unknown error'}`);
@@ -1154,10 +1187,6 @@ const TTest: React.FC<TTestProps> = ({ data = [], columns = [] }) => {
     );
   };
 
-  const handleSignificanceLevelChange = (event: SelectChangeEvent) => {
-    setSignificanceLevel(parseFloat(event.target.value as string));
-  };
-
   const renderGroupSelection = () => {
     if (!testType || testType === 'one-sample' || !parsedData) return null;
 
@@ -1275,10 +1304,11 @@ const TTest: React.FC<TTestProps> = ({ data = [], columns = [] }) => {
           <Box sx={{ borderBottom: 1, borderColor: 'divider', mb: 2 }}>
             <Tabs 
               value={tabValue} 
-              onChange={(event, newValue) => setTabValue(newValue)} 
+              onChange={handleTabChange}
               aria-label="t-test tabs"
             >
               <Tab label="Analysis" />
+              <Tab label="Execution Results" />
               <Tab label="Visual Comparison" />
             </Tabs>
           </Box>
@@ -1329,7 +1359,7 @@ const TTest: React.FC<TTestProps> = ({ data = [], columns = [] }) => {
                       type="number"
                       label="Population Mean"
                       value={populationMean}
-                      onChange={(event) => setPopulationMean(parseFloat(event.target.value))}
+                      onChange={handlePopulationMeanChange}
                     />
                   </Grid>
                 )}
@@ -1351,20 +1381,74 @@ const TTest: React.FC<TTestProps> = ({ data = [], columns = [] }) => {
                 <Grid item xs={12}>
                   <Button
                     variant="contained"
+                    color="primary"
                     onClick={handleRunTest}
-                    disabled={!isFileAnalyzed || isProcessing}
-                    startIcon={<FileUploadIcon />}
+                    disabled={isProcessing}
+                    sx={{ mt: 2 }}
                   >
-                    Run T-Test
+                    {isProcessing ? (
+                      <>
+                        <CircularProgress size={24} sx={{ mr: 1 }} />
+                        Processing...
+                      </>
+                    ) : (
+                      `Run ${testType === 'independent' ? 'Independent' : testType === 'paired' ? 'Paired' : 'One-Sample'} T-Test`
+                    )}
                   </Button>
+                  <FormHelperText>
+                    Clicking this button will recalculate results using the latest values from all inputs
+                  </FormHelperText>
                 </Grid>
               </Grid>
             </Paper>
-            {result && renderTestResults()}
           </TabPanel>
 
           <TabPanel value={tabValue} index={1}>
-            {result && renderChartData(result)}
+            {result && !inputsChanged ? (
+              renderTestResults()
+            ) : inputsChanged ? (
+              <Paper sx={{ p: 3, textAlign: 'center' }}>
+                <Typography variant="h6" color="warning.main">
+                  Inputs Changed - Results Outdated
+                </Typography>
+                <Typography variant="body2" color="text.secondary" sx={{ mt: 1 }}>
+                  You have modified the test configuration. Please go back to the Analysis tab and click "Run Test" to generate new results with the updated parameters.
+                </Typography>
+              </Paper>
+            ) : (
+              <Paper sx={{ p: 3, textAlign: 'center' }}>
+                <Typography variant="h6" color="text.secondary">
+                  No Results Yet
+                </Typography>
+                <Typography variant="body2" color="text.secondary">
+                  Configure your test parameters in the Analysis tab and click "Run Test" to see results here.
+                </Typography>
+              </Paper>
+            )}
+          </TabPanel>
+
+          <TabPanel value={tabValue} index={2}>
+            {result && !inputsChanged ? (
+              renderChartData(result)
+            ) : inputsChanged ? (
+              <Paper sx={{ p: 3, textAlign: 'center' }}>
+                <Typography variant="h6" color="warning.main">
+                  Inputs Changed - Charts Outdated
+                </Typography>
+                <Typography variant="body2" color="text.secondary" sx={{ mt: 1 }}>
+                  You have modified the test configuration. Please run the test again to see updated visualizations.
+                </Typography>
+              </Paper>
+            ) : (
+              <Paper sx={{ p: 3, textAlign: 'center' }}>
+                <Typography variant="h6" color="text.secondary">
+                  No Data to Visualize
+                </Typography>
+                <Typography variant="body2" color="text.secondary">
+                  Run a test first to see visual comparisons here.
+                </Typography>
+              </Paper>
+            )}
           </TabPanel>
         </>
       )}
