@@ -575,18 +575,82 @@ const StatisticalAnalysis: React.FC = () => {
   const detectColumnType = useCallback((column: string) => {
     if (!data.length || !column) return;
 
-    const values = data
-      .map(row => parseFloat(row[column] as string))
+    // Get all unique values in the column
+    const allValues = data.map(row => String(row[column]).trim().toLowerCase());
+    const uniqueValues = Array.from(new Set(allValues));
+    
+    // Filter out empty values
+    const nonEmptyValues = uniqueValues.filter(val => val !== '' && val !== 'null' && val !== 'undefined');
+    
+    console.log(`Analyzing column "${column}":`, {
+      totalRows: data.length,
+      uniqueValues: nonEmptyValues,
+      uniqueCount: nonEmptyValues.length
+    });
+
+    // Check if it's categorical data (few unique non-numeric values or binary outcomes)
+    let isCategorical = false;
+
+    // Check for common categorical patterns
+    const binaryPatterns = [
+      ['0', '1'],
+      ['yes', 'no'],
+      ['true', 'false'],
+      ['success', 'failure'],
+      ['pass', 'fail'],
+      ['male', 'female'],
+      ['m', 'f'],
+      ['positive', 'negative'],
+      ['pos', 'neg'],
+      ['high', 'low'],
+      ['good', 'bad'],
+      ['click', 'no_click'],
+      ['convert', 'no_convert'],
+      ['purchased', 'not_purchased']
+    ];
+
+    // Check if values match binary patterns
+    const sortedValues = nonEmptyValues.sort();
+    const matchesBinaryPattern = binaryPatterns.some(pattern => {
+      const sortedPattern = pattern.sort();
+      return sortedValues.length === 2 && 
+             sortedValues[0] === sortedPattern[0] && 
+             sortedValues[1] === sortedPattern[1];
+    });
+
+    // Check if it's a small number of discrete categories (≤ 10 unique values)
+    const hasLimitedCategories = nonEmptyValues.length <= 10 && nonEmptyValues.length >= 2;
+    
+    // Try to parse as numbers
+    const numericValues = allValues
+      .map(val => parseFloat(val))
       .filter(val => !isNaN(val));
 
-    if (values.length === 0) return;
+    const allNumeric = numericValues.length === allValues.length;
+    
+    if (allNumeric && numericValues.length > 0) {
+      // Check for proportion data (all values 0-1, and mostly 0s and 1s)
+      const isInPropRange = numericValues.every(val => val >= 0 && val <= 1);
+      const mostlyBinary = numericValues.filter(val => val === 0 || val === 1).length / numericValues.length > 0.8;
+      const isProportionType = isInPropRange && mostlyBinary;
+      
+      // Check for binary numeric (only 0s and 1s)
+      const isBinaryNumeric = numericValues.every(val => val === 0 || val === 1);
+      
+      isCategorical = isProportionType || isBinaryNumeric || (hasLimitedCategories && numericValues.every(val => val === Math.round(val)));
+    } else {
+      // Non-numeric data - treat as categorical if limited categories
+      isCategorical = matchesBinaryPattern || hasLimitedCategories;
+    }
 
-    // Check if all values are between 0 and 1 or all values are 0/1
-    const isProportionType = values.every(val => (val >= 0 && val <= 1)) &&
-                            values.some(val => val > 0) &&
-                            values.every(val => val === Math.round(val) || val === 0 || val === 1);
+    console.log(`Column "${column}" analysis result:`, {
+      isCategorical,
+      matchesBinaryPattern,
+      hasLimitedCategories,
+      allNumeric
+    });
 
-    setIsMetricContinuous(!isProportionType);
+    setIsMetricContinuous(!isCategorical);
   }, [data]);
 
   // Debounced state updates
@@ -629,8 +693,33 @@ const StatisticalAnalysis: React.FC = () => {
   const handleFileUpload = useCallback((event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
     if (file) {
+      // Reset all analysis state when a new file is uploaded
       setFile(file);
       setFileName(file.name);
+      
+      // Reset data and columns
+      setData([]);
+      setColumns([]);
+      
+      // Reset column selections
+      setMetricColumn('');
+      setGroupingColumn('');
+      setIsMetricContinuous(true);
+      
+      // Reset statistics and results
+      setGroupStats({});
+      setLeveneTest(null);
+      setTestResult(null);
+      setPostHocResults(null);
+      
+      // Reset UI state
+      setTabValue(0); // Reset to first tab
+      setIsCalculating(false);
+      setIsRunningTest(false);
+      setIsRunningPostHoc(false);
+      setInputsChanged(false);
+      setIsProcessing(false);
+      setShowTabs(false); // Hide tabs until new file is analyzed
     }
   }, []);
 
@@ -695,6 +784,8 @@ const StatisticalAnalysis: React.FC = () => {
     workerTimeoutRef.current = setTimeout(() => {
       const groupData: { [key: string]: number[] } = {};
       
+      if (isMetricContinuous) {
+        // Process continuous data
       data.forEach((row: any) => {
         const group = row[groupingColumn];
         const value = parseFloat(row[metricColumn]);
@@ -706,6 +797,41 @@ const StatisticalAnalysis: React.FC = () => {
           groupData[group].push(value);
         }
       });
+      } else {
+        // Process categorical data - convert to binary format
+        // First, determine the "success" category (1) vs "failure" category (0)
+        const allMetricValues = data.map((row: DataRow) => String(row[metricColumn] || '').trim().toLowerCase());
+        const uniqueMetricValues = Array.from(new Set(allMetricValues)).filter(val => val !== '' && val !== 'null' && val !== 'undefined');
+        
+        // Define what constitutes a "success" (coded as 1)
+        const successValues = ['1', 'yes', 'true', 'success', 'pass', 'positive', 'pos', 'high', 'good', 'click', 'convert', 'purchased'];
+        
+        let successCategory = uniqueMetricValues.find(val => successValues.includes(val as string));
+        
+        // If no standard success pattern found, take the first category alphabetically as success
+        if (!successCategory && uniqueMetricValues.length === 2) {
+          successCategory = uniqueMetricValues.sort()[1]; // Take the second one alphabetically
+        } else if (!successCategory && uniqueMetricValues.length > 0) {
+          successCategory = uniqueMetricValues[0]; // Take the first unique value
+        }
+        
+        console.log(`Categorical processing: Success category = "${successCategory}", All categories:`, uniqueMetricValues);
+        
+        data.forEach((row: any) => {
+          const group = row[groupingColumn];
+          const rawValue = String(row[metricColumn]).trim().toLowerCase();
+          
+          if (rawValue !== '' && rawValue !== 'null' && rawValue !== 'undefined') {
+            // Convert to binary: 1 for success category, 0 for others
+            const binaryValue = rawValue === successCategory ? 1 : 0;
+            
+            if (!groupData[group]) {
+              groupData[group] = [];
+            }
+            groupData[group].push(binaryValue);
+          }
+        });
+      }
       
       statsWorker.postMessage({
         type: 'calculateStats',
@@ -733,18 +859,33 @@ const StatisticalAnalysis: React.FC = () => {
 
   // Statistical test implementations
   const runTwoProportionZTest = useCallback((group1Data: number[], group2Data: number[]): TestResult => {
+    console.log('=== TWO-PROPORTION Z-TEST CALCULATION DEBUG ===');
+    console.log(`Group 1 data: [${group1Data.slice(0, 10).join(', ')}...] (${group1Data.length} values)`);
+    console.log(`Group 2 data: [${group2Data.slice(0, 10).join(', ')}...] (${group2Data.length} values)`);
+    
     const n1 = group1Data.length;
     const n2 = group2Data.length;
     const x1 = group1Data.reduce((a, b) => a + b, 0); // successes in group 1
     const x2 = group2Data.reduce((a, b) => a + b, 0); // successes in group 2
     
+    console.log(`Sample sizes: n1=${n1}, n2=${n2}`);
+    console.log(`Successes: x1=${x1}, x2=${x2}`);
+    
     const p1 = x1 / n1;
     const p2 = x2 / n2;
     const pooledP = (x1 + x2) / (n1 + n2);
     
+    console.log(`Proportions: p1=${p1.toFixed(4)}, p2=${p2.toFixed(4)}`);
+    console.log(`Pooled proportion: ${pooledP.toFixed(4)}`);
+    
     const se = Math.sqrt(pooledP * (1 - pooledP) * (1/n1 + 1/n2));
     const z = (p1 - p2) / se;
     const pValue = 2 * (1 - normalCDF(Math.abs(z)));
+    
+    console.log(`Standard error: ${se.toFixed(6)}`);
+    console.log(`Z-statistic: ${z.toFixed(6)}`);
+    console.log(`p-value: ${pValue.toFixed(8)}`);
+    console.log('=== END TWO-PROPORTION Z-TEST DEBUG ===');
     
     const isSignificant = pValue < 0.05;
     
@@ -1480,6 +1621,85 @@ const StatisticalAnalysis: React.FC = () => {
     };
   }, [metricColumn, groupingColumn, chiSquareCDF]);
 
+  // Function to save test results to a plain text file
+  const saveTestResultsToFile = useCallback(async (result: TestResult, postHocResults?: PostHocResult[] | null) => {
+    try {
+      // Extract scenario name from file name (remove .csv extension)
+      const scenarioName = fileName.replace(/\.csv$/i, '') || 'unknown_scenario';
+      
+      // Get number of groups
+      const numGroups = Object.keys(groupStats).length;
+      
+      // Build summary text
+      let summaryLines = [
+        `Scenario: ${scenarioName}`,
+        `Metric Column: ${metricColumn}`,
+        `Grouping Column: ${groupingColumn}`,
+        `Number of Groups: ${numGroups}`,
+        `Selected Test: ${result.testName}`,
+        `Test Statistic: ${result.testStatistic.toFixed(4)}`,
+        `p-value: ${result.pValue.toFixed(4)}`,
+        `Interpretation: ${result.isSignificant ? 'Reject' : 'Fail to Reject'} Null Hypothesis`,
+        `Post-Hoc Test: ${postHocResults && postHocResults.length > 0 ? (testRecommendation?.postHocMethod || 'Post-Hoc Analysis') : 'N/A'}`
+      ];
+      
+      // Add post-hoc details if available
+      if (postHocResults && postHocResults.length > 0) {
+        summaryLines.push('');
+        summaryLines.push('Post-Hoc Results:');
+        postHocResults.forEach((result, index) => {
+          summaryLines.push(`${index + 1}. ${result.groupA} vs ${result.groupB}: p-adj = ${result.adjustedPValue.toFixed(4)} (${result.isSignificant ? 'Significant' : 'Not Significant'})`);
+        });
+      }
+      
+      const summaryText = summaryLines.join('\n');
+      const resultFileName = `${scenarioName}_result.txt`;
+      
+      // Try to save via server API first
+      try {
+        const response = await fetch('http://localhost:5001/api/save-test-results', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify({
+            fileName: resultFileName,
+            content: summaryText
+          })
+        });
+        
+        if (response.ok) {
+          const responseData = await response.json();
+          console.log(`✅ ${responseData.message}`);
+          alert(`✅ Test results saved successfully to ${responseData.filePath}`);
+          return;
+        } else {
+          throw new Error(`Server responded with status: ${response.status}`);
+        }
+      } catch (serverError) {
+        console.warn('Server save failed, falling back to browser download:', serverError);
+        
+        // Fallback to browser download if server is not available
+        const blob = new Blob([summaryText], { type: 'text/plain' });
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement('a');
+        link.href = url;
+        link.download = resultFileName;
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+        URL.revokeObjectURL(url);
+        
+        console.log(`📥 Test results downloaded as ${resultFileName} (server unavailable)`);
+        alert(`📥 Server unavailable. File downloaded to your Downloads folder as ${resultFileName}.\nPlease manually move it to the test_outputs folder.`);
+      }
+      
+    } catch (error) {
+      console.error('Error saving test results to file:', error);
+      alert('❌ Error saving test results. Please check the console for details.');
+    }
+  }, [fileName, metricColumn, groupingColumn, groupStats, testRecommendation]);
+
   // Execute the recommended statistical test
   const executeStatisticalTest = useCallback(() => {
     if (!testRecommendation || !data.length || !metricColumn || !groupingColumn) return;
@@ -1497,6 +1717,7 @@ const StatisticalAnalysis: React.FC = () => {
         console.log('Total rows in data:', data.length);
         console.log('Metric column:', metricColumn);
         console.log('Grouping column:', groupingColumn);
+        console.log('Is metric continuous:', isMetricContinuous);
         console.log('First 5 rows of raw data:', data.slice(0, 5));
       } else {
         console.log(`=== PROCESSING LARGE DATASET (${data.length.toLocaleString()} rows) ===`);
@@ -1506,6 +1727,8 @@ const StatisticalAnalysis: React.FC = () => {
       let skippedCount = 0;
       const skippedReasons: string[] = [];
       
+      if (isMetricContinuous) {
+        // Process continuous data
       data.forEach((row, index) => {
         const group = String(row[groupingColumn]);
         const rawValue = row[metricColumn];
@@ -1528,6 +1751,51 @@ const StatisticalAnalysis: React.FC = () => {
           }
         }
       });
+      } else {
+        // Process categorical data - convert to binary format
+        // First, determine the "success" category (1) vs "failure" category (0)
+        const allMetricValues = data.map((row: DataRow) => String(row[metricColumn] || '').trim().toLowerCase());
+        const uniqueMetricValues = Array.from(new Set(allMetricValues)).filter(val => val !== '' && val !== 'null' && val !== 'undefined');
+        
+        // Define what constitutes a "success" (coded as 1)
+        const successValues = ['1', 'yes', 'true', 'success', 'pass', 'positive', 'pos', 'high', 'good', 'click', 'convert', 'purchased'];
+        
+        let successCategory = uniqueMetricValues.find(val => successValues.includes(val as string));
+        
+        // If no standard success pattern found, take the first category alphabetically as success
+        if (!successCategory && uniqueMetricValues.length === 2) {
+          successCategory = uniqueMetricValues.sort()[1]; // Take the second one alphabetically
+        } else if (!successCategory && uniqueMetricValues.length > 0) {
+          successCategory = uniqueMetricValues[0]; // Take the first unique value
+        }
+        
+        console.log(`Categorical processing for test execution: Success category = "${successCategory}", All categories:`, uniqueMetricValues);
+        
+        data.forEach((row, index) => {
+          const group = String(row[groupingColumn]);
+          const rawValue = String(row[metricColumn] || '').trim().toLowerCase();
+          
+          if (enableDetailedLogging && index < 5) {
+            console.log(`Row ${index}: group="${group}", rawValue="${rawValue}", successCategory="${successCategory}"`);
+          }
+          
+          if (rawValue !== '' && rawValue !== 'null' && rawValue !== 'undefined') {
+            // Convert to binary: 1 for success category, 0 for others
+            const binaryValue = rawValue === successCategory ? 1 : 0;
+            
+            if (!groupData[group]) {
+              groupData[group] = [];
+            }
+            groupData[group].push(binaryValue);
+            processedCount++;
+          } else {
+            skippedCount++;
+            if (skippedReasons.length < 10) {
+              skippedReasons.push(`Row ${index}: group="${group}", rawValue="${rawValue}"`);
+            }
+          }
+        });
+      }
 
       console.log('Processing summary:');
       console.log('- Processed rows:', processedCount.toLocaleString());
@@ -1653,7 +1921,7 @@ const StatisticalAnalysis: React.FC = () => {
       setIsRunningTest(false);
       markTestExecuted();
     }
-  }, [testRecommendation, data, metricColumn, groupingColumn, runTwoProportionZTest, runTwoSampleTTest, runOneWayANOVA, runWelchsANOVA, runChiSquareTest, runMannWhitneyUTest, runKruskalWallisTest, markTestExecuted]);
+  }, [testRecommendation, data, metricColumn, groupingColumn, runTwoProportionZTest, runTwoSampleTTest, runOneWayANOVA, runWelchsANOVA, runChiSquareTest, runMannWhitneyUTest, runKruskalWallisTest, markTestExecuted, saveTestResultsToFile]);
 
   // Post-hoc test functions
   const runTukeyHSD = useCallback((groupData: { [key: string]: number[] }): PostHocResult[] => {
@@ -1885,13 +2153,33 @@ const StatisticalAnalysis: React.FC = () => {
 
   // Execute post-hoc analysis
   const executePostHocAnalysis = useCallback(() => {
-    if (!testRecommendation || !data.length || !metricColumn || !groupingColumn || !testResult?.isSignificant) return;
+    console.log('=== POST-HOC EXECUTION CONDITIONS ===');
+    console.log('testRecommendation:', testRecommendation?.testName);
+    console.log('data.length:', data.length);
+    console.log('metricColumn:', metricColumn);
+    console.log('groupingColumn:', groupingColumn);
+    console.log('testResult?.isSignificant:', testResult?.isSignificant);
+    
+    if (!testRecommendation || !data.length || !metricColumn || !groupingColumn || !testResult?.isSignificant) {
+      console.log('❌ Post-hoc analysis conditions not met - early return');
+      return;
+    }
+    
+    console.log('✅ All conditions met - proceeding with post-hoc analysis');
 
     setIsRunningPostHoc(true);
 
     try {
       const groupData: { [key: string]: number[] } = {};
       
+      console.log('=== POST-HOC DATA PROCESSING DEBUG ===');
+      console.log('Test recommendation:', testRecommendation.testName);
+      console.log('Is metric continuous:', isMetricContinuous);
+      console.log('Metric column:', metricColumn);
+      console.log('Grouping column:', groupingColumn);
+      
+      if (isMetricContinuous) {
+        // Process continuous data
       data.forEach((row) => {
         const group = String(row[groupingColumn]);
         const rawValue = row[metricColumn];
@@ -1904,33 +2192,83 @@ const StatisticalAnalysis: React.FC = () => {
           groupData[group].push(value);
         }
       });
+      } else {
+        // Process categorical data - convert to binary format
+        const allMetricValues = data.map((row: DataRow) => String(row[metricColumn] || '').trim().toLowerCase());
+        const uniqueMetricValues = Array.from(new Set(allMetricValues)).filter(val => val !== '' && val !== 'null' && val !== 'undefined');
+        
+        // Define what constitutes a "success" (coded as 1)
+        const successValues = ['1', 'yes', 'true', 'success', 'pass', 'positive', 'pos', 'high', 'good', 'click', 'convert', 'purchased'];
+        
+        let successCategory = uniqueMetricValues.find(val => successValues.includes(val as string));
+        
+        // If no standard success pattern found, take the first category alphabetically as success
+        if (!successCategory && uniqueMetricValues.length === 2) {
+          successCategory = uniqueMetricValues.sort()[1]; // Take the second one alphabetically
+        } else if (!successCategory && uniqueMetricValues.length > 0) {
+          successCategory = uniqueMetricValues[0]; // Take the first unique value
+        }
+        
+        console.log(`Categorical processing for post-hoc: Success category = "${successCategory}", All categories:`, uniqueMetricValues);
+        
+        data.forEach((row) => {
+          const group = String(row[groupingColumn]);
+          const rawValue = String(row[metricColumn] || '').trim().toLowerCase();
+          
+          if (rawValue !== '' && rawValue !== 'null' && rawValue !== 'undefined') {
+            // Convert to binary: 1 for success category, 0 for others
+            const binaryValue = rawValue === successCategory ? 1 : 0;
+            
+            if (!groupData[group]) {
+              groupData[group] = [];
+            }
+            groupData[group].push(binaryValue);
+          }
+        });
+      }
+      
+      // Log group data summary
+      console.log('Group data processed:');
+      Object.keys(groupData).forEach(group => {
+        console.log(`  ${group}: ${groupData[group].length} values, first 5: [${groupData[group].slice(0, 5).join(', ')}]`);
+      });
+      console.log('=== END POST-HOC DATA PROCESSING DEBUG ===');
 
       let results: PostHocResult[] = [];
 
+      console.log('Running post-hoc analysis for:', testRecommendation.testName);
+
       switch (testRecommendation.testName) {
         case "One-way ANOVA":
+          console.log('Executing Tukey HSD...');
           results = runTukeyHSD(groupData);
           break;
         case "Welch's ANOVA":
+          console.log('Executing Games-Howell...');
           results = runGamesHowell(groupData);
           break;
         case "Kruskal-Wallis Test":
+          console.log('Executing Dunn Test...');
           results = runDunnTest(groupData);
           break;
         case "Chi-Square Test for Independence":
+          console.log('Executing Pairwise Proportion Tests...');
           results = runPairwiseProportionTests(groupData);
           break;
         default:
+          console.error(`Post-hoc analysis not implemented for ${testRecommendation.testName}`);
           throw new Error(`Post-hoc analysis not implemented for ${testRecommendation.testName}`);
       }
 
+      console.log('Post-hoc results:', results);
       setPostHocResults(results);
     } catch (error) {
       console.error('Error executing post-hoc analysis:', error);
+      alert(`Error executing post-hoc analysis: ${error instanceof Error ? error.message : 'Unknown error'}`);
     } finally {
       setIsRunningPostHoc(false);
     }
-  }, [testRecommendation, data, metricColumn, groupingColumn, testResult, runTukeyHSD, runGamesHowell, runDunnTest, runPairwiseProportionTests]);
+  }, [testRecommendation, data, metricColumn, groupingColumn, testResult, runTukeyHSD, runGamesHowell, runDunnTest, runPairwiseProportionTests, saveTestResultsToFile]);
 
   return (
     <Box sx={{ p: 3 }}>
@@ -1942,8 +2280,33 @@ const StatisticalAnalysis: React.FC = () => {
             e.preventDefault();
             const file = e.dataTransfer?.files[0];
             if (file) {
+              // Reset all analysis state when a new file is uploaded via drag & drop
               setFile(file);
               setFileName(file.name);
+              
+              // Reset data and columns
+              setData([]);
+              setColumns([]);
+              
+              // Reset column selections
+              setMetricColumn('');
+              setGroupingColumn('');
+              setIsMetricContinuous(true);
+              
+              // Reset statistics and results
+              setGroupStats({});
+              setLeveneTest(null);
+              setTestResult(null);
+              setPostHocResults(null);
+              
+              // Reset UI state
+              setTabValue(0); // Reset to first tab
+              setIsCalculating(false);
+              setIsRunningTest(false);
+              setIsRunningPostHoc(false);
+              setInputsChanged(false);
+              setIsProcessing(false);
+              setShowTabs(false); // Hide tabs until new file is analyzed
             }
           }}
         >
@@ -2393,6 +2756,27 @@ const StatisticalAnalysis: React.FC = () => {
                           </Typography>
                         </Alert>
                       </Box>
+
+                      {/* Export Results Button - Only show if Post-Hoc tab is not displayed */}
+                      {!shouldShowPostHocTab && (
+                        <Box sx={{ mt: 3, display: 'flex', justifyContent: 'center' }}>
+                          <Button
+                            variant="contained"
+                            onClick={() => saveTestResultsToFile(testResult, postHocResults)}
+                            sx={{
+                              backgroundColor: '#1976d2',
+                              '&:hover': {
+                                backgroundColor: '#1565c0',
+                              },
+                              fontWeight: 500,
+                              px: 4,
+                              py: 1
+                            }}
+                          >
+                            Export Results to File
+                          </Button>
+                        </Box>
+                      )}
                     </Paper>
                   )}
                 </>
@@ -2444,6 +2828,58 @@ const StatisticalAnalysis: React.FC = () => {
                 </Box>
 
                 {postHocResults && postHocResults.length > 0 && (
+                  <>
+                    {/* Multiple Comparison Correction Summary */}
+                    <Paper sx={{ p: 3, mb: 3, bgcolor: '#f8f9fa', border: '1px solid #e0e0e0' }}>
+                      <Typography variant="h6" sx={{ mb: 2, color: '#1976d2', fontWeight: 600 }}>
+                        📊 Multiple Comparison Correction Details
+                      </Typography>
+                      
+                      {(() => {
+                        // Calculate unique groups from post-hoc results
+                        const uniqueGroups = new Set<string>();
+                        postHocResults.forEach(result => {
+                          uniqueGroups.add(result.groupA);
+                          uniqueGroups.add(result.groupB);
+                        });
+                        const k = uniqueGroups.size;
+                        const numComparisons = (k * (k - 1)) / 2;
+                        const alpha = 0.05;
+                        const bonferroniAlpha = alpha / numComparisons;
+                        
+                        return (
+                          <Box>
+                            <Typography variant="body1" sx={{ mb: 2, lineHeight: 1.6 }}>
+                              <strong>Performing post-hoc analysis across {k} groups:</strong>
+                            </Typography>
+                            
+                            <Box sx={{ ml: 2, mb: 2 }}>
+                              <Typography variant="body2" sx={{ mb: 1 }}>
+                                • <strong>Total pairwise comparisons:</strong> {numComparisons}
+                              </Typography>
+                              <Typography variant="body2" sx={{ mb: 1 }}>
+                                • <strong>Original significance level (α):</strong> 0.05
+                              </Typography>
+                              <Typography variant="body2" sx={{ mb: 1 }}>
+                                • <strong>Bonferroni-adjusted α:</strong> {bonferroniAlpha.toFixed(4)}
+                              </Typography>
+                            </Box>
+                            
+                            <Alert severity="info" sx={{ mt: 2 }}>
+                              <Typography variant="body2">
+                                <strong>Why correction is needed:</strong> When performing multiple comparisons, the chance of finding at least one "significant" result by chance alone increases. 
+                                {testRecommendation?.postHocMethod?.includes('Tukey') || testRecommendation?.postHocMethod?.includes('Games-Howell') 
+                                  ? ` ${testRecommendation.postHocMethod} already includes built-in correction for multiple comparisons.`
+                                  : ` The Bonferroni correction controls the family-wise error rate by dividing α by the number of comparisons.`
+                                }
+                              </Typography>
+                            </Alert>
+                          </Box>
+                        );
+                      })()}
+                    </Paper>
+
+                    {/* Post-Hoc Results Table */}
                   <TableContainer component={Paper} sx={{ mb: 3 }}>
                     <Table>
                       <TableHead>
@@ -2455,18 +2891,31 @@ const StatisticalAnalysis: React.FC = () => {
                           )}
                           <TableCell>P-value</TableCell>
                           <TableCell>Adjusted P-value</TableCell>
-                          <TableCell>Significant</TableCell>
+                            <TableCell>Significant?</TableCell>
                         </TableRow>
                       </TableHead>
                       <TableBody>
-                        {postHocResults.map((result, index) => (
+                          {postHocResults.map((result, index) => {
+                            // Calculate correction threshold
+                            const uniqueGroups = new Set<string>();
+                            postHocResults.forEach(r => {
+                              uniqueGroups.add(r.groupA);
+                              uniqueGroups.add(r.groupB);
+                            });
+                            const k = uniqueGroups.size;
+                            const numComparisons = (k * (k - 1)) / 2;
+                            const bonferroniAlpha = 0.05 / numComparisons;
+                            const meetsBonferroniThreshold = result.adjustedPValue < bonferroniAlpha;
+                            
+                            return (
                           <TableRow 
                             key={`${result.groupA}-${result.groupB}`}
                             sx={{
-                              backgroundColor: result.isSignificant ? '#fff3e0' : 'inherit',
+                                  backgroundColor: result.isSignificant ? '#e8f5e8' : 'inherit',
                               '&:hover': {
-                                backgroundColor: result.isSignificant ? '#ffe0b2' : '#f5f5f5'
-                              }
+                                    backgroundColor: result.isSignificant ? '#d4edda' : '#f5f5f5'
+                                  },
+                                  borderLeft: result.isSignificant ? '4px solid #28a745' : '4px solid transparent'
                             }}
                           >
                             <TableCell sx={{ fontWeight: result.isSignificant ? 600 : 400 }}>
@@ -2485,26 +2934,43 @@ const StatisticalAnalysis: React.FC = () => {
                             </TableCell>
                             <TableCell sx={{ 
                               fontWeight: result.isSignificant ? 600 : 400,
-                              color: result.isSignificant ? '#d32f2f' : '#2e7d32'
+                                  color: result.isSignificant ? '#28a745' : '#6c757d'
                             }}>
                               {result.adjustedPValue.toFixed(4)}
+                                  {meetsBonferroniThreshold && (
+                                    <Typography variant="caption" sx={{ display: 'block', color: '#28a745', fontWeight: 500 }}>
+                                      (&lt; {bonferroniAlpha.toFixed(4)})
+                                    </Typography>
+                                  )}
                             </TableCell>
                             <TableCell>
                               {result.isSignificant ? (
-                                <Typography variant="body2" sx={{ color: '#d32f2f', fontWeight: 600 }}>
+                                    <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+                                      <Typography variant="body2" sx={{ color: '#28a745', fontWeight: 600 }}>
                                   ✅ Yes
                                 </Typography>
+                                      <Typography variant="caption" sx={{ color: '#28a745', fontStyle: 'italic' }}>
+                                        (Significant)
+                                      </Typography>
+                                    </Box>
                               ) : (
-                                <Typography variant="body2" sx={{ color: '#2e7d32' }}>
+                                    <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+                                      <Typography variant="body2" sx={{ color: '#6c757d' }}>
                                   ❌ No
                                 </Typography>
+                                      <Typography variant="caption" sx={{ color: '#6c757d', fontStyle: 'italic' }}>
+                                        (Not significant)
+                                      </Typography>
+                                    </Box>
                               )}
                             </TableCell>
                           </TableRow>
-                        ))}
+                            );
+                          })}
                       </TableBody>
                     </Table>
                   </TableContainer>
+                  </>
                 )}
 
                 {postHocResults && postHocResults.length > 0 && (
@@ -2525,6 +2991,25 @@ const StatisticalAnalysis: React.FC = () => {
                         })()}
                       </Typography>
                     </Alert>
+
+                    {/* Export Results Button */}
+                    <Box sx={{ mt: 3, display: 'flex', justifyContent: 'center' }}>
+                      <Button
+                        variant="contained"
+                        onClick={() => testResult && saveTestResultsToFile(testResult, postHocResults)}
+                        sx={{
+                          backgroundColor: '#1976d2',
+                          '&:hover': {
+                            backgroundColor: '#1565c0',
+                          },
+                          fontWeight: 500,
+                          px: 4,
+                          py: 1
+                        }}
+                      >
+                        Export Complete Results to File
+                      </Button>
+                    </Box>
                   </Box>
                 )}
               </Box>

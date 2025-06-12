@@ -1,0 +1,9 @@
+Scenario: scenario14
+Metric Column: metric
+Grouping Column: group
+Number of Groups: 2
+Selected Test: Welch's t-Test
+Test Statistic: -19.8435
+p-value: 1.0000
+Interpretation: Fail to Reject Null Hypothesis
+Post-Hoc Test: N/A

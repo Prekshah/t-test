@@ -1,0 +1,9 @@
+Scenario: scenario7
+Metric Column: metric
+Grouping Column: group
+Number of Groups: 4
+Selected Test: One-way ANOVA
+Test Statistic: 1.1314
+p-value: 0.3349
+Interpretation: Fail to Reject Null Hypothesis
+Post-Hoc Test: N/A
