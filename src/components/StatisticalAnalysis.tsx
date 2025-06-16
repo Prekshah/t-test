@@ -1657,18 +1657,30 @@ const StatisticalAnalysis: React.FC = () => {
         `Scenario: ${scenarioName}`,
         `Metric Column: ${metricColumn}`,
         `Grouping Column: ${groupingColumn}`,
-        `Number of Groups: ${numGroups}`,
-        `Selected Test: ${result.testName}`,
-        `Test Statistic: ${result.testStatistic.toFixed(4)}`,
-        `p-value: ${result.pValue.toFixed(4)}`,
-        `Interpretation: ${result.isSignificant ? 'Reject' : 'Fail to Reject'} Null Hypothesis`,
-        `Post-Hoc Test: ${postHocResults && postHocResults.length > 0 ? (testRecommendation?.postHocMethod || 'Post-Hoc Analysis') : 'N/A'}`
+        `Number of Groups: ${numGroups}`
       ];
+
+      // Add CUPED information if it was applied
+      if (result.cupedApplied) {
+        summaryLines.push('\nCUPED Variance Reduction:');
+        summaryLines.push(`Original variance: ${result.cupedOriginalVariance?.toFixed(4)}`);
+        summaryLines.push(`Adjusted variance: ${result.cupedAdjustedVariance?.toFixed(4)}`);
+        summaryLines.push(`Variance reduced by: ${result.cupedVarianceReduction?.toFixed(2)}%`);
+        summaryLines.push(`CUPED covariate: ${result.cupedCovariate}`);
+        summaryLines.push(`Theta value: ${result.cupedTheta?.toFixed(4)}`);
+      }
+
+      // Add test results
+      summaryLines.push('\nTest Results:');
+      summaryLines.push(`Selected Test: ${result.testName}`);
+      summaryLines.push(`Test Statistic: ${result.testStatistic.toFixed(4)}`);
+      summaryLines.push(`p-value: ${result.pValue.toFixed(4)}`);
+      summaryLines.push(`Interpretation: ${result.isSignificant ? 'Reject' : 'Fail to Reject'} Null Hypothesis`);
+      summaryLines.push(`Post-Hoc Test: ${postHocResults && postHocResults.length > 0 ? (testRecommendation?.postHocMethod || 'Post-Hoc Analysis') : 'N/A'}`);
       
       // Add post-hoc details if available
       if (postHocResults && postHocResults.length > 0) {
-        summaryLines.push('');
-        summaryLines.push('Post-Hoc Results:');
+        summaryLines.push('\nPost-Hoc Results:');
         postHocResults.forEach((result, index) => {
           summaryLines.push(`${index + 1}. ${result.groupA} vs ${result.groupB}: p-adj = ${result.adjustedPValue.toFixed(4)} (${result.isSignificant ? 'Significant' : 'Not Significant'})`);
         });
