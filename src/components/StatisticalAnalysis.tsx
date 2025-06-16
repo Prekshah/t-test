@@ -22,7 +22,9 @@ import {
   SelectChangeEvent,
   Skeleton,
   Theme,
-  BoxProps
+  BoxProps,
+  FormHelperText,
+  AlertTitle
 } from '@mui/material';
 import { styled } from '@mui/material/styles';
 import { parse } from 'papaparse';
@@ -84,6 +86,12 @@ interface TestResult {
   interpretation: string;
   postHocRequired: boolean;
   postHocReason: string;
+  cupedApplied?: boolean;
+  cupedTheta?: number;
+  cupedCovariate?: string;
+  cupedOriginalVariance?: number;
+  cupedAdjustedVariance?: number;
+  cupedVarianceReduction?: number;
 }
 
 interface TestRecommendation {
@@ -350,6 +358,7 @@ const StatisticalAnalysis: React.FC = () => {
   // State for selected columns
   const [metricColumn, setMetricColumn] = useState<string>('');
   const [groupingColumn, setGroupingColumn] = useState<string>('');
+  const [covariateColumn, setCovariateColumn] = useState<string>('');
   const [isMetricContinuous, setIsMetricContinuous] = useState<boolean>(true);
   
   // State for statistics
@@ -667,6 +676,11 @@ const StatisticalAnalysis: React.FC = () => {
     []
   );
 
+  const debouncedSetCovariateColumn = useMemo(
+    () => debounce((value: string) => setCovariateColumn(value), 300),
+    []
+  );
+
   // Handle metric column change
   const handleMetricChange = (event: SelectChangeEvent<string>) => {
     const column = event.target.value;
@@ -681,13 +695,20 @@ const StatisticalAnalysis: React.FC = () => {
     resetExecutionResults(); // Reset execution results when grouping changes
   };
 
+  // Handle covariate column change
+  const handleCovariateChange = (event: SelectChangeEvent<string>) => {
+    setCovariateColumn(event.target.value);
+    resetExecutionResults(); // Reset execution results when covariate changes
+  };
+
   // Cleanup debounced functions
   useEffect(() => {
     return () => {
       debouncedSetMetricColumn.cancel();
       debouncedSetGroupingColumn.cancel();
+      debouncedSetCovariateColumn.cancel();
     };
-  }, [debouncedSetMetricColumn, debouncedSetGroupingColumn]);
+  }, [debouncedSetMetricColumn, debouncedSetGroupingColumn, debouncedSetCovariateColumn]);
 
   // Handle file upload with optimization
   const handleFileUpload = useCallback((event: React.ChangeEvent<HTMLInputElement>) => {
@@ -704,6 +725,7 @@ const StatisticalAnalysis: React.FC = () => {
       // Reset column selections
       setMetricColumn('');
       setGroupingColumn('');
+      setCovariateColumn('');
       setIsMetricContinuous(true);
       
       // Reset statistics and results
@@ -1700,7 +1722,53 @@ const StatisticalAnalysis: React.FC = () => {
     }
   }, [fileName, metricColumn, groupingColumn, groupStats, testRecommendation]);
 
-  // Execute the recommended statistical test
+  // Add CUPED calculation function
+  const calculateCUPED = useCallback((metricData: number[], covariateData: number[]): { 
+    adjustedMetric: number[], 
+    theta: number,
+    originalVariance: number,
+    adjustedVariance: number,
+    varianceReduction: number 
+  } => {
+    if (metricData.length !== covariateData.length) {
+      throw new Error('Metric and covariate data must have the same length');
+    }
+
+    // Calculate theta (covariance / variance)
+    const covariateMean = covariateData.reduce((a, b) => a + b, 0) / covariateData.length;
+    const covariance = metricData.reduce((sum, val, i) => 
+      sum + (val - metricData.reduce((a, b) => a + b, 0) / metricData.length) * 
+      (covariateData[i] - covariateMean), 0) / metricData.length;
+    
+    const covariateVariance = covariateData.reduce((sum, val) => 
+      sum + Math.pow(val - covariateMean, 2), 0) / covariateData.length;
+    
+    const theta = covariance / covariateVariance;
+
+    // Calculate adjusted metric
+    const adjustedMetric = metricData.map((val, i) => 
+      val - theta * (covariateData[i] - covariateMean)
+    );
+
+    // Calculate variances
+    const originalMean = metricData.reduce((a, b) => a + b, 0) / metricData.length;
+    const originalVar = metricData.reduce((sum, val) => sum + Math.pow(val - originalMean, 2), 0) / metricData.length;
+    
+    const adjustedMean = adjustedMetric.reduce((a, b) => a + b, 0) / adjustedMetric.length;
+    const adjustedVar = adjustedMetric.reduce((sum, val) => sum + Math.pow(val - adjustedMean, 2), 0) / adjustedMetric.length;
+    
+    const varianceReduction = ((originalVar - adjustedVar) / originalVar) * 100;
+
+    return { 
+      adjustedMetric, 
+      theta, 
+      originalVariance: originalVar,
+      adjustedVariance: adjustedVar,
+      varianceReduction 
+    };
+  }, []);
+
+  // Modify executeStatisticalTest to handle CUPED
   const executeStatisticalTest = useCallback(() => {
     if (!testRecommendation || !data.length || !metricColumn || !groupingColumn) return;
 
@@ -1708,34 +1776,42 @@ const StatisticalAnalysis: React.FC = () => {
 
     try {
       const groupData: { [key: string]: number[] } = {};
+      let cupedResult: { 
+        adjustedMetric: number[], 
+        theta: number, 
+        originalVariance: number,
+        adjustedVariance: number,
+        varianceReduction: number 
+      } | null = null;
       
-      // Conditional logging for performance (only for smaller datasets)
-      const enableDetailedLogging = data.length < 10000; // Only log for datasets < 10k rows
-      
-      if (enableDetailedLogging) {
-        console.log('=== DATA PROCESSING DEBUG ===');
-        console.log('Total rows in data:', data.length);
-        console.log('Metric column:', metricColumn);
-        console.log('Grouping column:', groupingColumn);
-        console.log('Is metric continuous:', isMetricContinuous);
-        console.log('First 5 rows of raw data:', data.slice(0, 5));
-      } else {
-        console.log(`=== PROCESSING LARGE DATASET (${data.length.toLocaleString()} rows) ===`);
-      }
-      
-      let processedCount = 0;
-      let skippedCount = 0;
-      const skippedReasons: string[] = [];
-      
-      if (isMetricContinuous) {
-        // Process continuous data
-      data.forEach((row, index) => {
-        const group = String(row[groupingColumn]);
-        const rawValue = row[metricColumn];
-        const value = parseFloat(String(rawValue));
+      // Process data and apply CUPED if applicable
+      if (isMetricContinuous && covariateColumn) {
+        // Extract metric and covariate data
+        const metricData = data.map(row => parseFloat(String(row[metricColumn]))).filter(val => !isNaN(val));
+        const covariateData = data.map(row => parseFloat(String(row[covariateColumn]))).filter(val => !isNaN(val));
         
-        if (enableDetailedLogging && index < 5) {
-          console.log(`Row ${index}: group="${group}", rawValue=${rawValue} (type: ${typeof rawValue}), parsed=${value}, isNaN=${isNaN(value)}`);
+        if (metricData.length === covariateData.length && metricData.length > 0) {
+          try {
+            cupedResult = calculateCUPED(metricData, covariateData);
+          } catch (error) {
+            console.error('Error calculating CUPED:', error);
+            cupedResult = null;
+          }
+        }
+      }
+
+      // Process data for each group
+      data.forEach((row: any) => {
+        const group = row[groupingColumn];
+        let value: number;
+        
+        if (cupedResult) {
+          // Use CUPED-adjusted metric
+          const index = data.indexOf(row);
+          value = cupedResult.adjustedMetric[index];
+        } else {
+          // Use original metric
+          value = parseFloat(row[metricColumn]);
         }
         
         if (!isNaN(value)) {
@@ -1743,185 +1819,55 @@ const StatisticalAnalysis: React.FC = () => {
             groupData[group] = [];
           }
           groupData[group].push(value);
-          processedCount++;
-        } else {
-          skippedCount++;
-          if (skippedReasons.length < 10) {
-            skippedReasons.push(`Row ${index}: group="${group}", rawValue=${rawValue}, type=${typeof rawValue}`);
-          }
         }
       });
-      } else {
-        // Process categorical data - convert to binary format
-        // First, determine the "success" category (1) vs "failure" category (0)
-        const allMetricValues = data.map((row: DataRow) => String(row[metricColumn] || '').trim().toLowerCase());
-        const uniqueMetricValues = Array.from(new Set(allMetricValues)).filter(val => val !== '' && val !== 'null' && val !== 'undefined');
-        
-        // Define what constitutes a "success" (coded as 1)
-        const successValues = ['1', 'yes', 'true', 'success', 'pass', 'positive', 'pos', 'high', 'good', 'click', 'convert', 'purchased'];
-        
-        let successCategory = uniqueMetricValues.find(val => successValues.includes(val as string));
-        
-        // If no standard success pattern found, take the first category alphabetically as success
-        if (!successCategory && uniqueMetricValues.length === 2) {
-          successCategory = uniqueMetricValues.sort()[1]; // Take the second one alphabetically
-        } else if (!successCategory && uniqueMetricValues.length > 0) {
-          successCategory = uniqueMetricValues[0]; // Take the first unique value
-        }
-        
-        console.log(`Categorical processing for test execution: Success category = "${successCategory}", All categories:`, uniqueMetricValues);
-        
-        data.forEach((row, index) => {
-          const group = String(row[groupingColumn]);
-          const rawValue = String(row[metricColumn] || '').trim().toLowerCase();
-          
-          if (enableDetailedLogging && index < 5) {
-            console.log(`Row ${index}: group="${group}", rawValue="${rawValue}", successCategory="${successCategory}"`);
-          }
-          
-          if (rawValue !== '' && rawValue !== 'null' && rawValue !== 'undefined') {
-            // Convert to binary: 1 for success category, 0 for others
-            const binaryValue = rawValue === successCategory ? 1 : 0;
-            
-            if (!groupData[group]) {
-              groupData[group] = [];
-            }
-            groupData[group].push(binaryValue);
-            processedCount++;
-          } else {
-            skippedCount++;
-            if (skippedReasons.length < 10) {
-              skippedReasons.push(`Row ${index}: group="${group}", rawValue="${rawValue}"`);
-            }
-          }
-        });
-      }
 
-      console.log('Processing summary:');
-      console.log('- Processed rows:', processedCount.toLocaleString());
-      console.log('- Skipped rows:', skippedCount.toLocaleString());
-      
-      if (enableDetailedLogging && skippedReasons.length > 0) {
-        console.log('- Skipped examples:', skippedReasons);
-      }
-      
-      const groupNames = Object.keys(groupData);
-      console.log('Groups found:', groupNames);
-      
-      // Log group data (limited for large datasets)
-      groupNames.forEach(groupName => {
-        const groupValues = groupData[groupName];
-        console.log(`Group "${groupName}": ${groupValues.length.toLocaleString()} values`);
-        
-        if (enableDetailedLogging) {
-          console.log(`  - First 10 values: [${groupValues.slice(0, 10).join(', ')}]`);
-        }
-        
-        // Calculate stats efficiently for large datasets
-        const min = Math.min(...groupValues);
-        const max = Math.max(...groupValues);
-        const mean = groupValues.reduce((a, b) => a + b, 0) / groupValues.length;
-        
-        console.log(`  - Min: ${min}, Max: ${max}, Mean: ${mean.toFixed(4)}`);
-      });
-      
-      console.log('Test recommendation:', testRecommendation.testName);
-      console.log(enableDetailedLogging ? '=== END DEBUG ===' : '=== END PROCESSING ===');
+      // Execute the appropriate test based on testRecommendation
       let result: TestResult;
+      
+      if (testRecommendation.testName === "Two-Sample t-Test" || testRecommendation.testName === "Welch's t-Test") {
+        const groups = Object.keys(groupData);
+        if (groups.length !== 2) {
+          throw new Error('Two-sample test requires exactly two groups');
+        }
+        
+        result = runTwoSampleTTest(
+          groupData[groups[0]],
+          groupData[groups[1]],
+          testRecommendation.testName === "Two-Sample t-Test"
+        );
+      } else if (testRecommendation.testName === "Mann-Whitney U Test") {
+        const groups = Object.keys(groupData);
+        if (groups.length !== 2) {
+          throw new Error('Mann-Whitney U test requires exactly two groups');
+        }
+        
+        result = runMannWhitneyUTest(groupData[groups[0]], groupData[groups[1]]);
+      } else if (testRecommendation.testName === "Chi-Square Test for Independence") {
+        result = runChiSquareTest(groupData);
+      } else {
+        throw new Error(`Unsupported test type: ${testRecommendation.testName}`);
+      }
 
-      switch (testRecommendation.testName) {
-        case "Two-Proportion Z-Test":
-          if (enableDetailedLogging) {
-            console.log('=== FUNCTION INPUT DEBUG ===');
-            console.log('Two-Proportion Z-Test inputs:');
-            console.log(`Group 1 (${groupNames[0]}): [${groupData[groupNames[0]].slice(0, 10).join(', ')}...] (${groupData[groupNames[0]].length} values)`);
-            console.log(`Group 2 (${groupNames[1]}): [${groupData[groupNames[1]].slice(0, 10).join(', ')}...] (${groupData[groupNames[1]].length} values)`);
-          }
-          result = runTwoProportionZTest(groupData[groupNames[0]], groupData[groupNames[1]]);
-          break;
-
-        case "Two-Sample t-Test":
-          if (enableDetailedLogging) {
-            console.log('=== FUNCTION INPUT DEBUG ===');
-            console.log('Two-Sample t-Test inputs:');
-            console.log(`Group 1 (${groupNames[0]}): [${groupData[groupNames[0]].slice(0, 10).join(', ')}...] (${groupData[groupNames[0]].length} values)`);
-            console.log(`Group 2 (${groupNames[1]}): [${groupData[groupNames[1]].slice(0, 10).join(', ')}...] (${groupData[groupNames[1]].length} values)`);
-          }
-          result = runTwoSampleTTest(groupData[groupNames[0]], groupData[groupNames[1]], true);
-          break;
-
-        case "Welch's t-Test":
-          if (enableDetailedLogging) {
-            console.log('=== FUNCTION INPUT DEBUG ===');
-            console.log('Welch\'s t-Test inputs:');
-            console.log(`Group 1 (${groupNames[0]}): [${groupData[groupNames[0]].slice(0, 10).join(', ')}...] (${groupData[groupNames[0]].length} values)`);
-            console.log(`Group 2 (${groupNames[1]}): [${groupData[groupNames[1]].slice(0, 10).join(', ')}...] (${groupData[groupNames[1]].length} values)`);
-          }
-          result = runTwoSampleTTest(groupData[groupNames[0]], groupData[groupNames[1]], false);
-          break;
-
-        case "One-way ANOVA":
-          if (enableDetailedLogging) {
-            console.log('=== FUNCTION INPUT DEBUG ===');
-            console.log('One-way ANOVA inputs:');
-            // Avoid JSON.stringify for large datasets - just show structure
-            const groupSummary = Object.keys(groupData).map(key => `${key}: ${groupData[key].length} values`);
-            console.log('Group data summary:', groupSummary);
-          }
-          result = runOneWayANOVA(groupData);
-          break;
-
-        case "Welch's ANOVA":
-          if (enableDetailedLogging) {
-            console.log('=== FUNCTION INPUT DEBUG ===');
-            console.log('Welch\'s ANOVA inputs:');
-            // Avoid JSON.stringify for large datasets - just show structure
-            const groupSummary = Object.keys(groupData).map(key => `${key}: ${groupData[key].length} values`);
-            console.log('Group data summary:', groupSummary);
-          }
-          result = runWelchsANOVA(groupData);
-          break;
-
-        case "Chi-Square Test for Independence":
-          if (enableDetailedLogging) {
-            console.log('=== FUNCTION INPUT DEBUG ===');
-            console.log('Chi-Square Test inputs:');
-            // Avoid JSON.stringify for large datasets - just show structure
-            const groupSummary = Object.keys(groupData).map(key => `${key}: ${groupData[key].length} values`);
-            console.log('Group data summary:', groupSummary);
-          }
-          result = runChiSquareTest(groupData);
-          break;
-
-        case "Mann-Whitney U Test":
-          if (enableDetailedLogging) {
-            console.log('=== FUNCTION INPUT DEBUG ===');
-            console.log('Mann-Whitney U Test inputs:');
-            console.log(`Group 1 (${groupNames[0]}): [${groupData[groupNames[0]].slice(0, 10).join(', ')}...] (${groupData[groupNames[0]].length} values)`);
-            console.log(`Group 2 (${groupNames[1]}): [${groupData[groupNames[1]].slice(0, 10).join(', ')}...] (${groupData[groupNames[1]].length} values)`);
-          }
-          result = runMannWhitneyUTest(groupData[groupNames[0]], groupData[groupNames[1]]);
-          break;
-
-        case "Kruskal-Wallis Test":
-          console.log('=== FUNCTION INPUT DEBUG ===');
-          console.log('Kruskal-Wallis Test inputs:');
-          console.log('Full groupData object:', JSON.stringify(groupData, null, 2));
-          result = runKruskalWallisTest(groupData);
-          break;
-
-        default:
-          throw new Error(`Test ${testRecommendation.testName} not implemented yet`);
+      // Add CUPED information to result if applicable
+      if (cupedResult) {
+        result.cupedApplied = true;
+        result.cupedTheta = cupedResult.theta;
+        result.cupedCovariate = covariateColumn;
+        result.cupedOriginalVariance = cupedResult.originalVariance;
+        result.cupedAdjustedVariance = cupedResult.adjustedVariance;
+        result.cupedVarianceReduction = cupedResult.varianceReduction;
       }
 
       setTestResult(result);
+      markTestExecuted();
     } catch (error) {
       console.error('Error executing statistical test:', error);
+      setTestResult(null);
     } finally {
       setIsRunningTest(false);
-      markTestExecuted();
     }
-  }, [testRecommendation, data, metricColumn, groupingColumn, runTwoProportionZTest, runTwoSampleTTest, runOneWayANOVA, runWelchsANOVA, runChiSquareTest, runMannWhitneyUTest, runKruskalWallisTest, markTestExecuted, saveTestResultsToFile]);
+  }, [testRecommendation, data, metricColumn, groupingColumn, covariateColumn, isMetricContinuous, calculateCUPED, runTwoSampleTTest, runMannWhitneyUTest, runChiSquareTest, markTestExecuted]);
 
   // Post-hoc test functions
   const runTukeyHSD = useCallback((groupData: { [key: string]: number[] }): PostHocResult[] => {
@@ -2271,7 +2217,7 @@ const StatisticalAnalysis: React.FC = () => {
   }, [testRecommendation, data, metricColumn, groupingColumn, testResult, runTukeyHSD, runGamesHowell, runDunnTest, runPairwiseProportionTests, saveTestResultsToFile]);
 
   return (
-    <Box sx={{ p: 3 }}>
+    <Box sx={{ width: '100%', typography: 'body1' }}>
       <Box>
         <Box
           component="label"
@@ -2291,6 +2237,7 @@ const StatisticalAnalysis: React.FC = () => {
               // Reset column selections
               setMetricColumn('');
               setGroupingColumn('');
+              setCovariateColumn('');
               setIsMetricContinuous(true);
               
               // Reset statistics and results
@@ -2435,6 +2382,34 @@ const StatisticalAnalysis: React.FC = () => {
                   ))}
                 </Select>
               </FormControl>
+
+              {isMetricContinuous && (
+                <FormControl fullWidth sx={{ mb: 2 }}>
+                  <InputLabel>Covariate Column (Optional)</InputLabel>
+                  <Select
+                    value={covariateColumn}
+                    onChange={(e) => {
+                      setCovariateColumn(e.target.value);
+                      resetExecutionResults();
+                    }}
+                    label="Covariate Column (Optional)"
+                  >
+                    <MenuItem value="">
+                      <em>None</em>
+                    </MenuItem>
+                    {columns
+                      .filter(col => col !== metricColumn && col !== groupingColumn)
+                      .map((col) => (
+                        <MenuItem key={col} value={col}>
+                          {col}
+                        </MenuItem>
+                      ))}
+                  </Select>
+                  <FormHelperText>
+                    Select a pre-existing numeric column to apply CUPED variance reduction
+                  </FormHelperText>
+                </FormControl>
+              )}
 
               <FormControl fullWidth sx={{ mb: 2 }}>
                 <InputLabel>Grouping Column</InputLabel>
@@ -2675,6 +2650,24 @@ const StatisticalAnalysis: React.FC = () => {
 
                   {testResult && !inputsChanged && (
                     <Paper sx={{ p: 3, bgcolor: '#f8f9fa' }}>
+                      {testResult.cupedApplied && (
+                        <Alert severity="info" sx={{ mb: 3 }}>
+                          <Typography variant="body1">
+                            CUPED applied using covariate: {testResult.cupedCovariate}
+                            <br />
+                            Theta (θ): {testResult.cupedTheta?.toFixed(4)}
+                            <br />
+                            <br />
+                            CUPED Variance Reduction Summary:
+                            <br />
+                            - Original variance (raw metric): {testResult.cupedOriginalVariance?.toFixed(2)}
+                            <br />
+                            - Adjusted variance (CUPED metric): {testResult.cupedAdjustedVariance?.toFixed(2)}
+                            <br />
+                            - Variance reduced by: {testResult.cupedVarianceReduction?.toFixed(2)}%
+                          </Typography>
+                        </Alert>
+                      )}
                       <Typography variant="h6" sx={{ mb: 3, color: '#2e7d32' }}>
                         Test Results
                       </Typography>
