@@ -116,6 +116,15 @@ interface TabPanelProps extends BoxProps {
   value: number;
 }
 
+interface CovariateAnalysis {
+  selectedCovariate: string | null;
+  correlation: number;
+  otherCovariates: Array<{
+    column: string;
+    correlation: number;
+  }>;
+}
+
 // Memoize the CustomTabPanel component
 const CustomTabPanel = styled(Box)<{ theme?: Theme }>(({ theme }) => ({
   padding: theme?.spacing(3) || 24,
@@ -358,8 +367,8 @@ const StatisticalAnalysis: React.FC = () => {
   // State for selected columns
   const [metricColumn, setMetricColumn] = useState<string>('');
   const [groupingColumn, setGroupingColumn] = useState<string>('');
-  const [covariateColumn, setCovariateColumn] = useState<string>('');
   const [isMetricContinuous, setIsMetricContinuous] = useState<boolean>(true);
+  const [covariateAnalysis, setCovariateAnalysis] = useState<CovariateAnalysis | null>(null);
   
   // State for statistics
   const [groupStats, setGroupStats] = useState<GroupStats>({});
@@ -368,16 +377,165 @@ const StatisticalAnalysis: React.FC = () => {
   const [leveneTest, setLeveneTest] = useState<LeveneTestResult | null>(null);
   const [testResult, setTestResult] = useState<TestResult | null>(null);
   const [isRunningTest, setIsRunningTest] = useState(false);
-  const [inputsChanged, setInputsChanged] = useState(false); // Track if inputs have changed since last test
+  const [inputsChanged, setInputsChanged] = useState(false);
   const [postHocResults, setPostHocResults] = useState<PostHocResult[] | null>(null);
   const [isRunningPostHoc, setIsRunningPostHoc] = useState(false);
+  const [isCovariateListExpanded, setIsCovariateListExpanded] = useState(false);
   const workerTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+
+  // Calculate Pearson correlation coefficient
+  const calculatePearsonCorrelation = useCallback((x: number[], y: number[]): number => {
+    if (x.length !== y.length || x.length === 0) return 0;
+    
+    const n = x.length;
+    const sumX = x.reduce((a, b) => a + b, 0);
+    const sumY = y.reduce((a, b) => a + b, 0);
+    const sumXY = x.reduce((sum, xi, i) => sum + xi * y[i], 0);
+    const sumXX = x.reduce((sum, xi) => sum + xi * xi, 0);
+    const sumYY = y.reduce((sum, yi) => sum + yi * yi, 0);
+    
+    const numerator = n * sumXY - sumX * sumY;
+    const denominator = Math.sqrt((n * sumXX - sumX * sumX) * (n * sumYY - sumY * sumY));
+    
+    return denominator === 0 ? 0 : numerator / denominator;
+  }, []);
+
+  // Identify eligible covariate columns and select the best one
+  const identifyBestCovariate = useCallback((data: DataRow[], metricColumn: string, groupingColumn: string): CovariateAnalysis => {
+    console.log('=== AUTOMATIC COVARIATE SELECTION DEBUG ===');
+    console.log(`Metric column: ${metricColumn}`);
+    console.log(`Grouping column: ${groupingColumn}`);
+    
+    // Step 1: Find all numeric columns
+    const numericColumns: string[] = [];
+    
+    // Get all column names except metric and grouping
+    const potentialColumns = columns.filter(col => col !== metricColumn && col !== groupingColumn);
+    console.log(`Potential covariate columns (excluding metric and grouping): ${potentialColumns.join(', ')}`);
+    
+    // Check which columns are numeric
+    potentialColumns.forEach(col => {
+      const values = data.map(row => parseFloat(String(row[col]))).filter(val => !isNaN(val));
+      const totalRows = data.length;
+      const numericRatio = values.length / totalRows;
+      
+      // Consider column numeric if at least 80% of values are numeric
+      if (numericRatio >= 0.8) {
+        numericColumns.push(col);
+        console.log(`${col}: ${values.length}/${totalRows} numeric values (${(numericRatio * 100).toFixed(1)}%) - ELIGIBLE`);
+      } else {
+        console.log(`${col}: ${values.length}/${totalRows} numeric values (${(numericRatio * 100).toFixed(1)}%) - NOT ELIGIBLE`);
+      }
+    });
+    
+    console.log(`Numeric columns found: ${numericColumns.join(', ')}`);
+    
+    if (numericColumns.length === 0) {
+      console.log('No eligible numeric covariates found');
+      return {
+        selectedCovariate: null,
+        correlation: 0,
+        otherCovariates: []
+      };
+    }
+    
+    // Step 2: Filter out columns with high correlation with grouping column
+    const eligibleColumns: string[] = [];
+    const metricValues = data.map(row => parseFloat(String(row[metricColumn]))).filter(val => !isNaN(val));
+    
+    // Convert grouping column to numeric for correlation calculation
+    const uniqueGroups = Array.from(new Set(data.map(row => String(row[groupingColumn]))));
+    const groupMapping = Object.fromEntries(uniqueGroups.map((group, index) => [group, index]));
+    const groupValues = data.map(row => groupMapping[String(row[groupingColumn])]);
+    
+    console.log('Filtering columns by correlation with grouping variable...');
+    
+    numericColumns.forEach(col => {
+      const covariateValues = data.map(row => parseFloat(String(row[col]))).filter(val => !isNaN(val));
+      
+      // Ensure we have the same number of values for correlation calculation
+      const minLength = Math.min(covariateValues.length, groupValues.length);
+      const covariateSlice = covariateValues.slice(0, minLength);
+      const groupSlice = groupValues.slice(0, minLength);
+      
+      const correlationWithGroup = Math.abs(calculatePearsonCorrelation(covariateSlice, groupSlice));
+      
+      if (correlationWithGroup <= 0.1) {
+        eligibleColumns.push(col);
+        console.log(`${col}: correlation with grouping = ${correlationWithGroup.toFixed(4)} - ELIGIBLE`);
+      } else {
+        console.log(`${col}: correlation with grouping = ${correlationWithGroup.toFixed(4)} - EXCLUDED (too correlated with treatment)`);
+      }
+    });
+    
+    console.log(`Final eligible columns: ${eligibleColumns.join(', ')}`);
+    
+    if (eligibleColumns.length === 0) {
+      console.log('No columns remain after filtering for correlation with grouping variable');
+      return {
+        selectedCovariate: null,
+        correlation: 0,
+        otherCovariates: []
+      };
+    }
+    
+    // Step 3: Calculate correlations with outcome metric and sort
+    const correlations: Array<{ column: string; correlation: number }> = [];
+    
+    console.log('Calculating correlations with outcome metric...');
+    
+    eligibleColumns.forEach(col => {
+      // Get values for both metric and covariate, ensuring they align
+      const alignedData = data.map(row => ({
+        metric: parseFloat(String(row[metricColumn])),
+        covariate: parseFloat(String(row[col]))
+      })).filter(item => !isNaN(item.metric) && !isNaN(item.covariate));
+      
+      if (alignedData.length > 10) { // Minimum sample size for meaningful correlation
+        const metricVals = alignedData.map(item => item.metric);
+        const covariateVals = alignedData.map(item => item.covariate);
+        const correlation = calculatePearsonCorrelation(metricVals, covariateVals);
+        
+        correlations.push({ column: col, correlation });
+        console.log(`${col}: correlation with ${metricColumn} = ${correlation.toFixed(4)} (n=${alignedData.length})`);
+      } else {
+        console.log(`${col}: insufficient data for correlation (n=${alignedData.length})`);
+      }
+    });
+    
+    // Sort by absolute correlation (descending)
+    correlations.sort((a, b) => Math.abs(b.correlation) - Math.abs(a.correlation));
+    
+    if (correlations.length === 0) {
+      console.log('No valid correlations calculated');
+      return {
+        selectedCovariate: null,
+        correlation: 0,
+        otherCovariates: []
+      };
+    }
+    
+    // Step 4: Select best covariate
+    const bestCovariate = correlations[0];
+    const otherCovariates = correlations.slice(1);
+    
+    console.log(`Selected covariate: ${bestCovariate.column} (correlation: ${bestCovariate.correlation.toFixed(4)})`);
+    console.log('=== END AUTOMATIC COVARIATE SELECTION DEBUG ===');
+    
+    return {
+      selectedCovariate: bestCovariate.column,
+      correlation: bestCovariate.correlation,
+      otherCovariates
+    };
+  }, [columns, calculatePearsonCorrelation]);
 
   // Reset execution results when inputs change
   const resetExecutionResults = useCallback(() => {
     setTestResult(null);
     setPostHocResults(null);
     setInputsChanged(true);
+    setCovariateAnalysis(null); // Reset covariate analysis when inputs change
+    setIsCovariateListExpanded(false); // Reset expanded state when inputs change
   }, []);
 
   // Mark that test has been executed with current inputs
@@ -676,39 +834,31 @@ const StatisticalAnalysis: React.FC = () => {
     []
   );
 
-  const debouncedSetCovariateColumn = useMemo(
-    () => debounce((value: string) => setCovariateColumn(value), 300),
-    []
-  );
+
 
   // Handle metric column change
   const handleMetricChange = (event: SelectChangeEvent<string>) => {
     const column = event.target.value;
     setMetricColumn(column);
     detectColumnType(column);
-    resetExecutionResults(); // Reset execution results when metric changes
+    resetExecutionResults();
   };
 
   // Handle grouping column change
   const handleGroupingChange = (event: SelectChangeEvent<string>) => {
     setGroupingColumn(event.target.value);
-    resetExecutionResults(); // Reset execution results when grouping changes
+    resetExecutionResults();
   };
 
-  // Handle covariate column change
-  const handleCovariateChange = (event: SelectChangeEvent<string>) => {
-    setCovariateColumn(event.target.value);
-    resetExecutionResults(); // Reset execution results when covariate changes
-  };
+
 
   // Cleanup debounced functions
   useEffect(() => {
     return () => {
       debouncedSetMetricColumn.cancel();
       debouncedSetGroupingColumn.cancel();
-      debouncedSetCovariateColumn.cancel();
     };
-  }, [debouncedSetMetricColumn, debouncedSetGroupingColumn, debouncedSetCovariateColumn]);
+  }, [debouncedSetMetricColumn, debouncedSetGroupingColumn]);
 
   // Handle file upload with optimization
   const handleFileUpload = useCallback((event: React.ChangeEvent<HTMLInputElement>) => {
@@ -725,8 +875,8 @@ const StatisticalAnalysis: React.FC = () => {
       // Reset column selections
       setMetricColumn('');
       setGroupingColumn('');
-      setCovariateColumn('');
       setIsMetricContinuous(true);
+      setCovariateAnalysis(null);
       
       // Reset statistics and results
       setGroupStats({});
@@ -735,13 +885,13 @@ const StatisticalAnalysis: React.FC = () => {
       setPostHocResults(null);
       
       // Reset UI state
-      setTabValue(0); // Reset to first tab
+      setTabValue(0);
       setIsCalculating(false);
       setIsRunningTest(false);
       setIsRunningPostHoc(false);
       setInputsChanged(false);
       setIsProcessing(false);
-      setShowTabs(false); // Hide tabs until new file is analyzed
+      setShowTabs(false);
     }
   }, []);
 
@@ -876,8 +1026,18 @@ const StatisticalAnalysis: React.FC = () => {
   useEffect(() => {
     if (metricColumn && groupingColumn && data.length > 0) {
       calculateGroupStats(data);
+      
+      // Automatically identify best covariate for continuous metrics
+      if (isMetricContinuous) {
+        const analysis = identifyBestCovariate(data, metricColumn, groupingColumn);
+        setCovariateAnalysis(analysis);
+        setIsCovariateListExpanded(false); // Reset expanded state when new analysis is performed
+      } else {
+        setCovariateAnalysis(null);
+        setIsCovariateListExpanded(false);
+      }
     }
-  }, [metricColumn, groupingColumn, data, calculateGroupStats]);
+  }, [metricColumn, groupingColumn, data, calculateGroupStats, isMetricContinuous, identifyBestCovariate]);
 
   // Statistical test implementations
   const runTwoProportionZTest = useCallback((group1Data: number[], group2Data: number[]): TestResult => {
@@ -1734,7 +1894,7 @@ const StatisticalAnalysis: React.FC = () => {
     }
   }, [fileName, metricColumn, groupingColumn, groupStats, testRecommendation]);
 
-  // Add CUPED calculation function
+  // Add CUPED calculation function with enhanced variance tracking
   const calculateCUPED = useCallback((metricData: number[], covariateData: number[]): { 
     adjustedMetric: number[], 
     theta: number,
@@ -1747,10 +1907,11 @@ const StatisticalAnalysis: React.FC = () => {
     }
 
     // Calculate theta (covariance / variance)
+    const metricMean = metricData.reduce((a, b) => a + b, 0) / metricData.length;
     const covariateMean = covariateData.reduce((a, b) => a + b, 0) / covariateData.length;
+    
     const covariance = metricData.reduce((sum, val, i) => 
-      sum + (val - metricData.reduce((a, b) => a + b, 0) / metricData.length) * 
-      (covariateData[i] - covariateMean), 0) / metricData.length;
+      sum + (val - metricMean) * (covariateData[i] - covariateMean), 0) / metricData.length;
     
     const covariateVariance = covariateData.reduce((sum, val) => 
       sum + Math.pow(val - covariateMean, 2), 0) / covariateData.length;
@@ -1763,8 +1924,7 @@ const StatisticalAnalysis: React.FC = () => {
     );
 
     // Calculate variances
-    const originalMean = metricData.reduce((a, b) => a + b, 0) / metricData.length;
-    const originalVar = metricData.reduce((sum, val) => sum + Math.pow(val - originalMean, 2), 0) / metricData.length;
+    const originalVar = metricData.reduce((sum, val) => sum + Math.pow(val - metricMean, 2), 0) / metricData.length;
     
     const adjustedMean = adjustedMetric.reduce((a, b) => a + b, 0) / adjustedMetric.length;
     const adjustedVar = adjustedMetric.reduce((sum, val) => sum + Math.pow(val - adjustedMean, 2), 0) / adjustedMetric.length;
@@ -1780,7 +1940,7 @@ const StatisticalAnalysis: React.FC = () => {
     };
   }, []);
 
-  // Modify executeStatisticalTest to handle CUPED
+  // Modify executeStatisticalTest to handle automatic CUPED
   const executeStatisticalTest = useCallback(() => {
     if (!testRecommendation || !data.length || !metricColumn || !groupingColumn) return;
 
@@ -1797,14 +1957,22 @@ const StatisticalAnalysis: React.FC = () => {
       } | null = null;
       
       // Process data and apply CUPED if applicable
-      if (isMetricContinuous && covariateColumn) {
-        // Extract metric and covariate data
-        const metricData = data.map(row => parseFloat(String(row[metricColumn]))).filter(val => !isNaN(val));
-        const covariateData = data.map(row => parseFloat(String(row[covariateColumn]))).filter(val => !isNaN(val));
+      if (isMetricContinuous && covariateAnalysis?.selectedCovariate) {
+        console.log(`Applying CUPED with automatically selected covariate: ${covariateAnalysis.selectedCovariate}`);
         
-        if (metricData.length === covariateData.length && metricData.length > 0) {
+        // Extract metric and covariate data in aligned fashion
+        const alignedData = data.map(row => ({
+          metric: parseFloat(String(row[metricColumn])),
+          covariate: parseFloat(String(row[covariateAnalysis.selectedCovariate!])),
+          group: String(row[groupingColumn])
+        })).filter(item => !isNaN(item.metric) && !isNaN(item.covariate));
+        
+        if (alignedData.length > 0) {
           try {
+            const metricData = alignedData.map(item => item.metric);
+            const covariateData = alignedData.map(item => item.covariate);
             cupedResult = calculateCUPED(metricData, covariateData);
+            console.log(`CUPED applied successfully. Variance reduction: ${cupedResult.varianceReduction.toFixed(2)}%`);
           } catch (error) {
             console.error('Error calculating CUPED:', error);
             cupedResult = null;
@@ -1813,26 +1981,55 @@ const StatisticalAnalysis: React.FC = () => {
       }
 
       // Process data for each group
-      data.forEach((row: any) => {
-        const group = row[groupingColumn];
-        let value: number;
+      if (cupedResult) {
+        // Use CUPED-adjusted metric
+        const alignedData = data.map(row => ({
+          metric: parseFloat(String(row[metricColumn])),
+          covariate: parseFloat(String(row[covariateAnalysis!.selectedCovariate!])),
+          group: String(row[groupingColumn])
+        })).filter(item => !isNaN(item.metric) && !isNaN(item.covariate));
         
-        if (cupedResult) {
-          // Use CUPED-adjusted metric
-          const index = data.indexOf(row);
-          value = cupedResult.adjustedMetric[index];
-        } else {
-          // Use original metric
-          value = parseFloat(row[metricColumn]);
-        }
-        
-        if (!isNaN(value)) {
-          if (!groupData[group]) {
-            groupData[group] = [];
+        alignedData.forEach((item, index) => {
+          const adjustedValue = cupedResult!.adjustedMetric[index];
+          if (!groupData[item.group]) {
+            groupData[item.group] = [];
           }
-          groupData[group].push(value);
-        }
-      });
+          groupData[item.group].push(adjustedValue);
+        });
+      } else {
+        // Use original metric
+        data.forEach((row: any) => {
+          const group = row[groupingColumn];
+          let value: number;
+          
+          if (isMetricContinuous) {
+            value = parseFloat(row[metricColumn]);
+          } else {
+            // Handle categorical data
+            const rawValue = String(row[metricColumn]).trim().toLowerCase();
+            const allMetricValues = data.map((r: DataRow) => String(r[metricColumn] || '').trim().toLowerCase());
+            const uniqueMetricValues = Array.from(new Set(allMetricValues)).filter(val => val !== '' && val !== 'null' && val !== 'undefined');
+            
+            const successValues = ['1', 'yes', 'true', 'success', 'pass', 'positive', 'pos', 'high', 'good', 'click', 'convert', 'purchased'];
+            let successCategory = uniqueMetricValues.find(val => successValues.includes(val as string));
+            
+            if (!successCategory && uniqueMetricValues.length === 2) {
+              successCategory = uniqueMetricValues.sort()[1];
+            } else if (!successCategory && uniqueMetricValues.length > 0) {
+              successCategory = uniqueMetricValues[0];
+            }
+            
+            value = rawValue === successCategory ? 1 : 0;
+          }
+          
+          if (!isNaN(value)) {
+            if (!groupData[group]) {
+              groupData[group] = [];
+            }
+            groupData[group].push(value);
+          }
+        });
+      }
 
       // Execute the appropriate test based on testRecommendation
       let result: TestResult;
@@ -1848,6 +2045,10 @@ const StatisticalAnalysis: React.FC = () => {
           groupData[groups[1]],
           testRecommendation.testName === "Two-Sample t-Test"
         );
+      } else if (testRecommendation.testName === "One-way ANOVA") {
+        result = runOneWayANOVA(groupData);
+      } else if (testRecommendation.testName === "Welch's ANOVA") {
+        result = runWelchsANOVA(groupData);
       } else if (testRecommendation.testName === "Mann-Whitney U Test") {
         const groups = Object.keys(groupData);
         if (groups.length !== 2) {
@@ -1855,6 +2056,15 @@ const StatisticalAnalysis: React.FC = () => {
         }
         
         result = runMannWhitneyUTest(groupData[groups[0]], groupData[groups[1]]);
+      } else if (testRecommendation.testName === "Kruskal-Wallis Test") {
+        result = runKruskalWallisTest(groupData);
+      } else if (testRecommendation.testName === "Two-Proportion Z-Test") {
+        const groups = Object.keys(groupData);
+        if (groups.length !== 2) {
+          throw new Error('Two-proportion test requires exactly two groups');
+        }
+        
+        result = runTwoProportionZTest(groupData[groups[0]], groupData[groups[1]]);
       } else if (testRecommendation.testName === "Chi-Square Test for Independence") {
         result = runChiSquareTest(groupData);
       } else {
@@ -1862,10 +2072,10 @@ const StatisticalAnalysis: React.FC = () => {
       }
 
       // Add CUPED information to result if applicable
-      if (cupedResult) {
+      if (cupedResult && covariateAnalysis?.selectedCovariate) {
         result.cupedApplied = true;
         result.cupedTheta = cupedResult.theta;
-        result.cupedCovariate = covariateColumn;
+        result.cupedCovariate = covariateAnalysis.selectedCovariate;
         result.cupedOriginalVariance = cupedResult.originalVariance;
         result.cupedAdjustedVariance = cupedResult.adjustedVariance;
         result.cupedVarianceReduction = cupedResult.varianceReduction;
@@ -1879,7 +2089,7 @@ const StatisticalAnalysis: React.FC = () => {
     } finally {
       setIsRunningTest(false);
     }
-  }, [testRecommendation, data, metricColumn, groupingColumn, covariateColumn, isMetricContinuous, calculateCUPED, runTwoSampleTTest, runMannWhitneyUTest, runChiSquareTest, markTestExecuted]);
+  }, [testRecommendation, data, metricColumn, groupingColumn, isMetricContinuous, covariateAnalysis, calculateCUPED, runTwoSampleTTest, runOneWayANOVA, runWelchsANOVA, runMannWhitneyUTest, runKruskalWallisTest, runTwoProportionZTest, runChiSquareTest, markTestExecuted]);
 
   // Post-hoc test functions
   const runTukeyHSD = useCallback((groupData: { [key: string]: number[] }): PostHocResult[] => {
@@ -2249,8 +2459,8 @@ const StatisticalAnalysis: React.FC = () => {
               // Reset column selections
               setMetricColumn('');
               setGroupingColumn('');
-              setCovariateColumn('');
               setIsMetricContinuous(true);
+              setCovariateAnalysis(null);
               
               // Reset statistics and results
               setGroupStats({});
@@ -2259,13 +2469,13 @@ const StatisticalAnalysis: React.FC = () => {
               setPostHocResults(null);
               
               // Reset UI state
-              setTabValue(0); // Reset to first tab
+              setTabValue(0);
               setIsCalculating(false);
               setIsRunningTest(false);
               setIsRunningPostHoc(false);
               setInputsChanged(false);
               setIsProcessing(false);
-              setShowTabs(false); // Hide tabs until new file is analyzed
+              setShowTabs(false);
             }
           }}
         >
@@ -2395,32 +2605,71 @@ const StatisticalAnalysis: React.FC = () => {
                 </Select>
               </FormControl>
 
-              {isMetricContinuous && (
-                <FormControl fullWidth sx={{ mb: 2 }}>
-                  <InputLabel>Covariate Column (Optional)</InputLabel>
-                  <Select
-                    value={covariateColumn}
-                    onChange={(e) => {
-                      setCovariateColumn(e.target.value);
-                      resetExecutionResults();
-                    }}
-                    label="Covariate Column (Optional)"
-                  >
-                    <MenuItem value="">
-                      <em>None</em>
-                    </MenuItem>
-                    {columns
-                      .filter(col => col !== metricColumn && col !== groupingColumn)
-                      .map((col) => (
-                        <MenuItem key={col} value={col}>
-                          {col}
-                        </MenuItem>
-                      ))}
-                  </Select>
-                  <FormHelperText>
-                    Select a pre-existing numeric column to apply CUPED variance reduction
-                  </FormHelperText>
-                </FormControl>
+              {isMetricContinuous && covariateAnalysis && (
+                <Paper sx={{ p: 3, mb: 2, bgcolor: '#f0f8ff', border: '1px solid #1976d2' }}>
+                  <Typography variant="h6" sx={{ mb: 2, color: '#1976d2', fontWeight: 600 }}>
+                    🎯 Automatic CUPED Covariate Selection
+                  </Typography>
+                  
+                  {covariateAnalysis.selectedCovariate ? (
+                    <Box>
+                      <Alert severity="success" sx={{ mb: 2 }}>
+                        <Typography variant="body1" sx={{ fontWeight: 500 }}>
+                          <strong>Automatically selected CUPED covariate:</strong> {covariateAnalysis.selectedCovariate}
+                          <br />
+                          <strong>Correlation with outcome metric:</strong> {covariateAnalysis.correlation.toFixed(4)}
+                        </Typography>
+                      </Alert>
+                      
+                      {covariateAnalysis.otherCovariates.length > 0 && (
+                        <Box sx={{ mt: 2 }}>
+                          <Typography variant="body2" sx={{ fontWeight: 500, mb: 1 }}>
+                            Other potential covariates:
+                          </Typography>
+                          <Box sx={{ ml: 2 }}>
+                            {(isCovariateListExpanded 
+                              ? covariateAnalysis.otherCovariates 
+                              : covariateAnalysis.otherCovariates.slice(0, 5)
+                            ).map((covariate, index) => (
+                              <Typography key={index} variant="body2" sx={{ color: '#666' }}>
+                                • {covariate.column}: {covariate.correlation.toFixed(4)}
+                              </Typography>
+                            ))}
+                            
+                            {covariateAnalysis.otherCovariates.length > 5 && (
+                              <Typography 
+                                variant="body2" 
+                                sx={{ 
+                                  color: '#1976d2', 
+                                  fontStyle: 'italic',
+                                  cursor: 'pointer',
+                                  textDecoration: 'underline',
+                                  '&:hover': {
+                                    color: '#1565c0'
+                                  }
+                                }}
+                                onClick={() => setIsCovariateListExpanded(!isCovariateListExpanded)}
+                              >
+                                {isCovariateListExpanded 
+                                  ? '▼ Show less' 
+                                  : `▶ ... and ${covariateAnalysis.otherCovariates.length - 5} more`
+                                }
+                              </Typography>
+                            )}
+                          </Box>
+                        </Box>
+                      )}
+                    </Box>
+                  ) : (
+                    <Alert severity="info">
+                      <Typography variant="body1">
+                        No suitable covariate columns found for CUPED analysis.
+                        <br />
+                        Requirements: Numeric columns with correlation &lt; 0.1 with grouping variable and sufficient correlation with outcome metric.
+                      </Typography>
+                    </Alert>
+                  )}
+                </Paper>
               )}
 
               <FormControl fullWidth sx={{ mb: 2 }}>
