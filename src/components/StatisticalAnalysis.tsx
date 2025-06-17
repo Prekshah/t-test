@@ -2439,7 +2439,7 @@ const StatisticalAnalysis: React.FC = () => {
   }, [testRecommendation, data, metricColumn, groupingColumn, testResult, runTukeyHSD, runGamesHowell, runDunnTest, runPairwiseProportionTests, saveTestResultsToFile]);
 
   return (
-    <Box sx={{ width: '100%', typography: 'body1' }}>
+    <Box sx={{ width: '100%', typography: 'body1', p: 3, maxWidth: '1200px', mx: 'auto' }}>
       <Box>
         <Box
           component="label"
