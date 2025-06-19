@@ -94,6 +94,14 @@ interface TestResult {
   cupedVarianceReduction?: number;
 }
 
+interface BootstrapResult {
+  meanDifferenceCI: [number, number];
+  bootstrapPValue: number;
+  observedMeanDifference: number;
+  reason: string;
+  numResamples: number;
+}
+
 interface TestRecommendation {
   testName: string;
   requiresPostHoc: boolean;
@@ -381,6 +389,7 @@ const StatisticalAnalysis: React.FC = () => {
   const [postHocResults, setPostHocResults] = useState<PostHocResult[] | null>(null);
   const [isRunningPostHoc, setIsRunningPostHoc] = useState(false);
   const [isCovariateListExpanded, setIsCovariateListExpanded] = useState(false);
+  const [bootstrapResult, setBootstrapResult] = useState<BootstrapResult | null>(null);
   const workerTimeoutRef = useRef<NodeJS.Timeout | null>(null);
 
   // Calculate Pearson correlation coefficient
@@ -533,6 +542,7 @@ const StatisticalAnalysis: React.FC = () => {
   const resetExecutionResults = useCallback(() => {
     setTestResult(null);
     setPostHocResults(null);
+    setBootstrapResult(null);
     setInputsChanged(true);
     setCovariateAnalysis(null); // Reset covariate analysis when inputs change
     setIsCovariateListExpanded(false); // Reset expanded state when inputs change
@@ -883,6 +893,7 @@ const StatisticalAnalysis: React.FC = () => {
       setLeveneTest(null);
       setTestResult(null);
       setPostHocResults(null);
+      setBootstrapResult(null);
       
       // Reset UI state
       setTabValue(0);
@@ -1640,6 +1651,127 @@ const StatisticalAnalysis: React.FC = () => {
     };
   }, [metricColumn, groupingColumn, chiSquareCDF]);
 
+  // Bootstrapping implementation for mean comparisons
+  const performBootstrap = useCallback((group1Data: number[], group2Data: number[], numResamples: number = 1000): BootstrapResult => {
+    console.log('=== BOOTSTRAPPING CALCULATION DEBUG ===');
+    console.log(`Group 1 size: ${group1Data.length}, Group 2 size: ${group2Data.length}`);
+    console.log(`Number of resamples: ${numResamples}`);
+    
+    // Calculate observed mean difference
+    const mean1 = group1Data.reduce((a, b) => a + b, 0) / group1Data.length;
+    const mean2 = group2Data.reduce((a, b) => a + b, 0) / group2Data.length;
+    const observedMeanDifference = mean1 - mean2;
+    
+    console.log(`Observed means: Group 1 = ${mean1.toFixed(6)}, Group 2 = ${mean2.toFixed(6)}`);
+    console.log(`Observed mean difference: ${observedMeanDifference.toFixed(6)}`);
+    
+    // Bootstrap resampling
+    const bootstrapDifferences: number[] = [];
+    
+    for (let i = 0; i < numResamples; i++) {
+      // Resample with replacement for each group
+      const resample1: number[] = [];
+      const resample2: number[] = [];
+      
+      for (let j = 0; j < group1Data.length; j++) {
+        const randomIndex = Math.floor(Math.random() * group1Data.length);
+        resample1.push(group1Data[randomIndex]);
+      }
+      
+      for (let j = 0; j < group2Data.length; j++) {
+        const randomIndex = Math.floor(Math.random() * group2Data.length);
+        resample2.push(group2Data[randomIndex]);
+      }
+      
+      // Calculate mean difference for this resample
+      const resampleMean1 = resample1.reduce((a, b) => a + b, 0) / resample1.length;
+      const resampleMean2 = resample2.reduce((a, b) => a + b, 0) / resample2.length;
+      const resampleDifference = resampleMean1 - resampleMean2;
+      
+      bootstrapDifferences.push(resampleDifference);
+    }
+    
+    // Sort bootstrap differences for CI calculation
+    bootstrapDifferences.sort((a, b) => a - b);
+    
+    // Calculate 95% confidence interval (2.5th and 97.5th percentiles)
+    const lowerIndex = Math.floor(0.025 * numResamples);
+    const upperIndex = Math.floor(0.975 * numResamples);
+    const meanDifferenceCI: [number, number] = [
+      bootstrapDifferences[lowerIndex],
+      bootstrapDifferences[upperIndex]
+    ];
+    
+    // Calculate bootstrap p-value
+    // Count how many bootstrap differences are as extreme as the observed difference
+    const extremeCount = bootstrapDifferences.filter(diff => 
+      Math.abs(diff) >= Math.abs(observedMeanDifference)
+    ).length;
+    const bootstrapPValue = extremeCount / numResamples;
+    
+    console.log(`Bootstrap CI: [${meanDifferenceCI[0].toFixed(6)}, ${meanDifferenceCI[1].toFixed(6)}]`);
+    console.log(`Bootstrap p-value: ${bootstrapPValue.toFixed(6)}`);
+    console.log(`Extreme values count: ${extremeCount} out of ${numResamples}`);
+    console.log('=== END BOOTSTRAPPING DEBUG ===');
+    
+    return {
+      meanDifferenceCI,
+      bootstrapPValue,
+      observedMeanDifference,
+      reason: '',
+      numResamples
+    };
+  }, []);
+
+  // Check if bootstrapping should be applied
+  const shouldApplyBootstrap = useCallback((testResult: TestResult, groupStats: GroupStats): { shouldApply: boolean; reason: string } => {
+    // Check conditions for bootstrapping
+    const conditions = {
+      isContinuous: isMetricContinuous,
+      twoGroups: Object.keys(groupStats).length === 2,
+      borderlinePValue: testResult.pValue >= 0.04 && testResult.pValue <= 0.06,
+      hasSkewness: false
+    };
+    
+    // Check for skewness in either group
+    Object.values(groupStats).forEach(stats => {
+      if (Math.abs(stats.skewness) > 1.5) {
+        conditions.hasSkewness = true;
+      }
+    });
+    
+    console.log('=== BOOTSTRAP CONDITIONS CHECK ===');
+    console.log('Conditions:', conditions);
+    console.log(`Primary test: ${testResult.testName}, p-value: ${testResult.pValue.toFixed(4)}`);
+    
+    if (!conditions.isContinuous) {
+      console.log('❌ Bootstrap not applicable: metric is not continuous');
+      return { shouldApply: false, reason: '' };
+    }
+    
+    if (!conditions.twoGroups) {
+      console.log('❌ Bootstrap not applicable: not exactly two groups');
+      return { shouldApply: false, reason: '' };
+    }
+    
+    if (!conditions.borderlinePValue) {
+      console.log(`❌ Bootstrap not applicable: p-value (${testResult.pValue.toFixed(4)}) not in borderline range [0.04, 0.06]`);
+      return { shouldApply: false, reason: '' };
+    }
+    
+    if (!conditions.hasSkewness) {
+      console.log('❌ Bootstrap not applicable: data not sufficiently skewed');
+      return { shouldApply: false, reason: '' };
+    }
+    
+    const reason = `Bootstrapping was applied due to a borderline primary p-value (${testResult.pValue.toFixed(4)}) and skewed data distribution. This provides a more robust confidence interval for the mean difference.`;
+    
+    console.log('✅ All conditions met for bootstrapping');
+    console.log('=== END BOOTSTRAP CONDITIONS CHECK ===');
+    
+    return { shouldApply: true, reason };
+  }, [isMetricContinuous]);
+
   // Mann-Whitney U Test implementation
   const runMannWhitneyUTest = useCallback((group1Data: number[], group2Data: number[]): TestResult => {
     const n1 = group1Data.length;
@@ -2083,6 +2215,32 @@ const StatisticalAnalysis: React.FC = () => {
 
       setTestResult(result);
       markTestExecuted();
+
+      // Check if bootstrapping should be applied
+      if (result && Object.keys(groupStats).length > 0) {
+        const bootstrapCheck = shouldApplyBootstrap(result, groupStats);
+        if (bootstrapCheck.shouldApply) {
+          console.log('🎯 Bootstrapping conditions met - running bootstrap analysis');
+          
+          // Get the two groups for bootstrapping
+          const groupNames = Object.keys(groupData);
+          if (groupNames.length === 2) {
+            const group1Data = groupData[groupNames[0]];
+            const group2Data = groupData[groupNames[1]];
+            
+            // Perform bootstrapping
+            const bootstrapResult = performBootstrap(group1Data, group2Data);
+            bootstrapResult.reason = bootstrapCheck.reason;
+            
+            setBootstrapResult(bootstrapResult);
+            console.log('✅ Bootstrap analysis completed and results stored');
+          }
+        } else {
+          // Clear any previous bootstrap results
+          setBootstrapResult(null);
+          console.log('❌ Bootstrap conditions not met - clearing previous results');
+        }
+      }
     } catch (error) {
       console.error('Error executing statistical test:', error);
       setTestResult(null);
@@ -2467,6 +2625,7 @@ const StatisticalAnalysis: React.FC = () => {
               setLeveneTest(null);
               setTestResult(null);
               setPostHocResults(null);
+              setBootstrapResult(null);
               
               // Reset UI state
               setTabValue(0);
@@ -3011,12 +3170,87 @@ const StatisticalAnalysis: React.FC = () => {
                         </Alert>
                       </Box>
 
+                      {/* Bootstrap Results Section */}
+                      {bootstrapResult && (
+                        <Box sx={{ mt: 4 }}>
+                          <Typography variant="h6" sx={{ mb: 2, color: '#ff6f00', fontWeight: 600 }}>
+                            🔄 Bootstrap Validation Results
+                          </Typography>
+                          
+                          <Alert severity="warning" sx={{ mb: 3 }}>
+                            <AlertTitle sx={{ fontWeight: 600 }}>Bootstrap Analysis Applied</AlertTitle>
+                            <Typography variant="body1">
+                              {bootstrapResult.reason}
+                            </Typography>
+                          </Alert>
+
+                          <Paper sx={{ p: 3, bgcolor: '#fff3e0', border: '1px solid #ff6f00' }}>
+                            <Grid container spacing={3}>
+                              <Grid item xs={12} md={6}>
+                                <Box sx={{ mb: 2 }}>
+                                  <Typography variant="subtitle1" sx={{ fontWeight: 600, color: '#ff6f00' }}>
+                                    Bootstrap 95% Confidence Interval:
+                                  </Typography>
+                                  <Typography variant="body1" sx={{ fontWeight: 500 }}>
+                                    [{bootstrapResult.meanDifferenceCI[0].toFixed(4)}, {bootstrapResult.meanDifferenceCI[1].toFixed(4)}]
+                                  </Typography>
+                                </Box>
+
+                                <Box sx={{ mb: 2 }}>
+                                  <Typography variant="subtitle1" sx={{ fontWeight: 600, color: '#ff6f00' }}>
+                                    Bootstrap P-value:
+                                  </Typography>
+                                  <Typography variant="body1" sx={{ 
+                                    fontWeight: 600,
+                                    color: bootstrapResult.bootstrapPValue < 0.05 ? '#d32f2f' : '#2e7d32'
+                                  }}>
+                                    {bootstrapResult.bootstrapPValue.toFixed(4)}
+                                  </Typography>
+                                </Box>
+                              </Grid>
+
+                              <Grid item xs={12} md={6}>
+                                <Box sx={{ mb: 2 }}>
+                                  <Typography variant="subtitle1" sx={{ fontWeight: 600, color: '#ff6f00' }}>
+                                    Observed Mean Difference:
+                                  </Typography>
+                                  <Typography variant="body1">
+                                    {bootstrapResult.observedMeanDifference.toFixed(4)}
+                                  </Typography>
+                                </Box>
+
+                                <Box sx={{ mb: 2 }}>
+                                  <Typography variant="subtitle1" sx={{ fontWeight: 600, color: '#ff6f00' }}>
+                                    Bootstrap Resamples:
+                                  </Typography>
+                                  <Typography variant="body1">
+                                    {bootstrapResult.numResamples.toLocaleString()}
+                                  </Typography>
+                                </Box>
+                              </Grid>
+                            </Grid>
+
+                            <Box sx={{ mt: 3 }}>
+                              <Alert severity="info">
+                                <Typography variant="body2">
+                                  <strong>Interpretation:</strong> The bootstrap confidence interval provides a robust estimate of the mean difference that doesn't rely on distributional assumptions. 
+                                  {bootstrapResult.meanDifferenceCI[0] > 0 || bootstrapResult.meanDifferenceCI[1] < 0 
+                                    ? " Since the confidence interval does not include zero, this suggests a significant difference between groups."
+                                    : " Since the confidence interval includes zero, this suggests no significant difference between groups."
+                                  }
+                                </Typography>
+                              </Alert>
+                            </Box>
+                                                     </Paper>
+                         </Box>
+                       )}
+
                       {/* Export Results Button - Only show if Post-Hoc tab is not displayed */}
                       {!shouldShowPostHocTab && (
                         <Box sx={{ mt: 3, display: 'flex', justifyContent: 'center' }}>
                           <Button
                             variant="contained"
-                            onClick={() => saveTestResultsToFile(testResult, postHocResults)}
+                            onClick={() => testResult && saveTestResultsToFile(testResult, postHocResults)}
                             sx={{
                               backgroundColor: '#1976d2',
                               '&:hover': {

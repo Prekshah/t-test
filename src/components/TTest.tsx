@@ -212,10 +212,24 @@ interface BoxPlotData {
 
 // Function to calculate histogram bins
 const calculateHistogramBins = (data: number[], binCount = 10) => {
-  if (data.length === 0) return { bins: [], counts: [] };
+  if (!data || data.length === 0) return { bins: [], counts: [], binWidth: 0 };
   
-  const min = Math.min(...data);
-  const max = Math.max(...data);
+  // Filter out invalid values
+  const validData = data.filter(d => typeof d === 'number' && !isNaN(d) && isFinite(d));
+  if (validData.length === 0) return { bins: [], counts: [], binWidth: 0 };
+  
+  const min = Math.min(...validData);
+  const max = Math.max(...validData);
+  
+  // Handle edge case where all values are the same
+  if (min === max) {
+    return {
+      bins: [min - 0.5, min + 0.5],
+      counts: [100],
+      binWidth: 1
+    };
+  }
+  
   const binWidth = (max - min) / binCount;
   
   // Create bin edges
@@ -225,13 +239,15 @@ const calculateHistogramBins = (data: number[], binCount = 10) => {
   const counts = Array(binCount).fill(0);
   
   // Count values in each bin
-  data.forEach(value => {
-    const binIndex = Math.min(Math.floor((value - min) / binWidth), binCount - 1);
+  validData.forEach(value => {
+    let binIndex = Math.floor((value - min) / binWidth);
+    // Handle edge case where value equals max
+    if (binIndex >= binCount) binIndex = binCount - 1;
     counts[binIndex]++;
   });
   
   // Convert to percentages
-  const percentages = counts.map(count => (count / data.length) * 100);
+  const percentages = counts.map(count => (count / validData.length) * 100);
   
   return {
     bins,
@@ -1039,6 +1055,8 @@ const TTest: React.FC<TTestProps> = ({ data = [], columns = [] }) => {
 
             const barOptions = {
               responsive: true,
+              maintainAspectRatio: false,
+              resizeDelay: 0,
               plugins: {
                 legend: {
                   display: false
@@ -1063,8 +1081,17 @@ const TTest: React.FC<TTestProps> = ({ data = [], columns = [] }) => {
                   title: {
                     display: true,
                     text: 'Percentage (%)'
+                  },
+                  ticks: {
+                    callback: function(value: any) {
+                      return value + '%';
+                    }
                   }
                 }
+              },
+              interaction: {
+                intersect: false,
+                mode: 'index' as const
               }
             };
 
@@ -1077,7 +1104,15 @@ const TTest: React.FC<TTestProps> = ({ data = [], columns = [] }) => {
                     <strong>Treatment Group:</strong> {comparison.treatmentGroup}
                   </Typography>
                 </Box>
-                <Box sx={{ height: 400 }}>
+                <Box sx={{ 
+                  height: 400, 
+                  width: '100%',
+                  position: 'relative',
+                  '& canvas': {
+                    maxWidth: '100% !important',
+                    height: 'auto !important'
+                  }
+                }}>
                   <Chart type="bar" data={barData} options={barOptions} />
                 </Box>
               </Box>
@@ -1118,6 +1153,8 @@ const TTest: React.FC<TTestProps> = ({ data = [], columns = [] }) => {
 
             const histogramOptions = {
               responsive: true,
+              maintainAspectRatio: false,
+              resizeDelay: 0,
               plugins: {
                 legend: {
                   display: true,
@@ -1143,6 +1180,10 @@ const TTest: React.FC<TTestProps> = ({ data = [], columns = [] }) => {
                   title: {
                     display: true,
                     text: 'Value Ranges'
+                  },
+                  ticks: {
+                    maxRotation: 45,
+                    minRotation: 0
                   }
                 },
                 y: {
@@ -1150,8 +1191,17 @@ const TTest: React.FC<TTestProps> = ({ data = [], columns = [] }) => {
                   title: {
                     display: true,
                     text: 'Percentage of Values (%)'
+                  },
+                  ticks: {
+                    callback: function(value: any) {
+                      return value + '%';
+                    }
                   }
                 }
+              },
+              interaction: {
+                intersect: false,
+                mode: 'index' as const
               }
             };
 
@@ -1176,7 +1226,15 @@ const TTest: React.FC<TTestProps> = ({ data = [], columns = [] }) => {
                     <strong>Standard Deviation (Treatment):</strong> {treatmentStats.stdDev.toFixed(2)}
                   </Typography>
                 </Box>
-                <Box sx={{ height: 400 }}>
+                <Box sx={{ 
+                  height: 400, 
+                  width: '100%',
+                  position: 'relative',
+                  '& canvas': {
+                    maxWidth: '100% !important',
+                    height: 'auto !important'
+                  }
+                }}>
                   <Chart type="bar" data={histogramData} options={histogramOptions} />
                 </Box>
               </Box>
