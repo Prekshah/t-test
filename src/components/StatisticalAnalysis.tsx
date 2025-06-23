@@ -665,6 +665,13 @@ const StatisticalAnalysis: React.FC = () => {
 
     const numGroups = Object.keys(groupStats).length;
     
+    console.log(`\n🎯 === TEST RECOMMENDATION DEBUG ===`);
+    console.log(`Metric column: "${metricColumn}"`);
+    console.log(`Grouping column: "${groupingColumn}"`);
+    console.log(`isMetricContinuous: ${isMetricContinuous}`);
+    console.log(`Number of groups: ${numGroups}`);
+    console.log(`=== END TEST RECOMMENDATION DEBUG ===\n`);
+    
     // For proportion metrics
     if (!isMetricContinuous) {
       if (numGroups === 2) {
@@ -754,8 +761,13 @@ const StatisticalAnalysis: React.FC = () => {
 
   // Detect if a column is continuous or proportion
   const detectColumnType = useCallback((column: string) => {
-    if (!data.length || !column) return;
+    if (!data.length || !column) {
+      console.log(`⚠️ METRIC DETECTION SKIPPED: data.length=${data.length}, column="${column}"`);
+      return;
+    }
 
+    console.log(`\n🔍 === METRIC TYPE DETECTION: "${column}" ===`);
+    
     // Get all unique values in the column
     const allValues = data.map(row => String(row[column]).trim().toLowerCase());
     const uniqueValues = Array.from(new Set(allValues));
@@ -763,34 +775,20 @@ const StatisticalAnalysis: React.FC = () => {
     // Filter out empty values
     const nonEmptyValues = uniqueValues.filter(val => val !== '' && val !== 'null' && val !== 'undefined');
     
-    console.log(`Analyzing column "${column}":`, {
-      totalRows: data.length,
-      uniqueValues: nonEmptyValues,
-      uniqueCount: nonEmptyValues.length
-    });
+    console.log(`📊 Data Summary:`);
+    console.log(`   - Total rows: ${data.length}`);
+    console.log(`   - Unique values: ${nonEmptyValues.length}`);
+    console.log(`   - Sample values: [${nonEmptyValues.slice(0, 10).join(', ')}]`);
+    console.log(`   - Raw sample values from data: [${data.slice(0, 5).map(row => row[column]).join(', ')}]`);
 
-    // Check if it's categorical data (few unique non-numeric values or binary outcomes)
-    let isCategorical = false;
-
-    // Check for common categorical patterns
+    // STEP 1: Check for common text-based categorical patterns
     const binaryPatterns = [
-      ['0', '1'],
-      ['yes', 'no'],
-      ['true', 'false'],
-      ['success', 'failure'],
-      ['pass', 'fail'],
-      ['male', 'female'],
-      ['m', 'f'],
-      ['positive', 'negative'],
-      ['pos', 'neg'],
-      ['high', 'low'],
-      ['good', 'bad'],
-      ['click', 'no_click'],
-      ['convert', 'no_convert'],
-      ['purchased', 'not_purchased']
+      ['0', '1'], ['yes', 'no'], ['true', 'false'], ['success', 'failure'],
+      ['pass', 'fail'], ['male', 'female'], ['m', 'f'], ['positive', 'negative'],
+      ['pos', 'neg'], ['high', 'low'], ['good', 'bad'], ['click', 'no_click'],
+      ['convert', 'no_convert'], ['purchased', 'not_purchased']
     ];
 
-    // Check if values match binary patterns
     const sortedValues = nonEmptyValues.sort();
     const matchesBinaryPattern = binaryPatterns.some(pattern => {
       const sortedPattern = pattern.sort();
@@ -799,39 +797,80 @@ const StatisticalAnalysis: React.FC = () => {
              sortedValues[1] === sortedPattern[1];
     });
 
-    // Check if it's a small number of discrete categories (≤ 10 unique values)
-    const hasLimitedCategories = nonEmptyValues.length <= 10 && nonEmptyValues.length >= 2;
-    
-    // Try to parse as numbers
+    if (matchesBinaryPattern) {
+      console.log(`✅ Text-based binary pattern detected: [${sortedValues.join(', ')}]`);
+      console.log(`🎯 CLASSIFICATION: "${column}" → CATEGORICAL (text binary pattern)`);
+      console.log(`=== END DETECTION ===\n`);
+      setIsMetricContinuous(false);
+      return;
+    }
+
+    // STEP 2: Try to parse all values as numbers
     const numericValues = allValues
       .map(val => parseFloat(val))
       .filter(val => !isNaN(val));
 
     const allNumeric = numericValues.length === allValues.length;
-    
-    if (allNumeric && numericValues.length > 0) {
-      // Check for proportion data (all values 0-1, and mostly 0s and 1s)
-      const isInPropRange = numericValues.every(val => val >= 0 && val <= 1);
-      const mostlyBinary = numericValues.filter(val => val === 0 || val === 1).length / numericValues.length > 0.8;
-      const isProportionType = isInPropRange && mostlyBinary;
-      
-      // Check for binary numeric (only 0s and 1s)
-      const isBinaryNumeric = numericValues.every(val => val === 0 || val === 1);
-      
-      isCategorical = isProportionType || isBinaryNumeric || (hasLimitedCategories && numericValues.every(val => val === Math.round(val)));
-    } else {
-      // Non-numeric data - treat as categorical if limited categories
-      isCategorical = matchesBinaryPattern || hasLimitedCategories;
+    console.log(`🔢 Numeric Analysis:`);
+    console.log(`   - All values numeric: ${allNumeric} (${numericValues.length}/${allValues.length})`);
+
+    if (!allNumeric) {
+      // Mixed or non-numeric data
+      const hasLimitedCategories = nonEmptyValues.length <= 10 && nonEmptyValues.length >= 2;
+      const isCategorical = hasLimitedCategories;
+      console.log(`   - Mixed/non-numeric data with ≤10 categories: ${hasLimitedCategories}`);
+      console.log(`🎯 CLASSIFICATION: "${column}" → ${isCategorical ? 'CATEGORICAL' : 'CONTINUOUS'} (non-numeric)`);
+      console.log(`=== END DETECTION ===\n`);
+      setIsMetricContinuous(!isCategorical);
+      return;
     }
 
-    console.log(`Column "${column}" analysis result:`, {
-      isCategorical,
-      matchesBinaryPattern,
-      hasLimitedCategories,
-      allNumeric
-    });
+    // STEP 3: All values are numeric - apply strict proportion rules
+    const minValue = Math.min(...numericValues);
+    const maxValue = Math.max(...numericValues);
+    
+    console.log(`📈 Numeric Value Analysis:`);
+    console.log(`   - Value range: [${minValue.toFixed(3)}, ${maxValue.toFixed(3)}]`);
+    
+    // CRITICAL CHECK: If ANY value is outside [0,1], immediately classify as CONTINUOUS
+    if (minValue < 0 || maxValue > 1) {
+      console.log(`❌ VALUES OUTSIDE [0,1] RANGE DETECTED!`);
+      console.log(`🎯 CLASSIFICATION: "${column}" → CONTINUOUS`);
+      console.log(`📝 Reason: Values outside [0,1] range (min: ${minValue.toFixed(3)}, max: ${maxValue.toFixed(3)})`);
+      console.log(`=== END DETECTION ===\n`);
+      setIsMetricContinuous(true);
+      return;
+    }
 
-    setIsMetricContinuous(!isCategorical);
+    // All values are in [0,1] range - check proportion criteria
+    console.log(`✅ All values within [0,1] range - checking proportion criteria...`);
+    
+    const binaryCount = numericValues.filter(val => val === 0 || val === 1).length;
+    const binaryRatio = binaryCount / numericValues.length;
+    const isBinaryNumeric = numericValues.every(val => val === 0 || val === 1);
+    
+    console.log(`   - Pure binary (only 0s and 1s): ${isBinaryNumeric}`);
+    console.log(`   - Binary values: ${binaryCount}/${numericValues.length} (${(binaryRatio * 100).toFixed(1)}%)`);
+    console.log(`   - Meets 80% binary threshold: ${binaryRatio >= 0.8}`);
+
+    // Final proportion classification requires BOTH conditions:
+    // 1. Values in [0,1] range (already verified above)
+    // 2. At least 80% are exactly 0 or 1
+    const isProportionMetric = binaryRatio >= 0.8;
+    
+    if (isProportionMetric) {
+      console.log(`✅ PROPORTION CRITERIA MET!`);
+      console.log(`🎯 CLASSIFICATION: "${column}" → PROPORTION`);
+      console.log(`📝 Reason: Values in [0,1] AND ${(binaryRatio * 100).toFixed(1)}% are binary (≥80%)`);
+    } else {
+      console.log(`❌ PROPORTION CRITERIA NOT MET`);
+      console.log(`🎯 CLASSIFICATION: "${column}" → CONTINUOUS`);
+      console.log(`📝 Reason: Only ${(binaryRatio * 100).toFixed(1)}% are binary values (< 80% threshold)`);
+    }
+    
+    console.log(`🎯 FINAL DECISION: Setting isMetricContinuous = ${!isProportionMetric}`);
+    console.log(`=== END DETECTION ===\n`);
+    setIsMetricContinuous(!isProportionMetric);
   }, [data]);
 
   // Debounced state updates
@@ -971,7 +1010,54 @@ const StatisticalAnalysis: React.FC = () => {
     workerTimeoutRef.current = setTimeout(() => {
       const groupData: { [key: string]: number[] } = {};
       
-      if (isMetricContinuous) {
+      // INLINE METRIC TYPE DETECTION - Don't rely on potentially stale state
+      const metricColumnValues = data.map((row: any) => String(row[metricColumn] || '').trim());
+      const numericValues = metricColumnValues
+        .map((val: string) => parseFloat(val))
+        .filter((val: number) => !isNaN(val));
+      
+      const allNumeric = numericValues.length === metricColumnValues.length;
+      let isActuallyContinuous = true; // Default to continuous
+      
+      if (allNumeric && numericValues.length > 0) {
+        const minValue = Math.min(...numericValues);
+        const maxValue = Math.max(...numericValues);
+        
+        console.log(`📊 INLINE DETECTION in calculateGroupStats:`);
+        console.log(`   - Metric column: "${metricColumn}"`);
+        console.log(`   - All numeric: ${allNumeric} (${numericValues.length}/${metricColumnValues.length})`);
+        console.log(`   - Value range: [${minValue.toFixed(3)}, ${maxValue.toFixed(3)}]`);
+        
+        // If values are outside [0,1], definitely continuous
+        if (minValue < 0 || maxValue > 1) {
+          console.log(`   - 🎯 CONTINUOUS: Values outside [0,1] range`);
+          isActuallyContinuous = true;
+        } else {
+          // Values in [0,1] - check if they're mostly binary
+          const binaryCount = numericValues.filter((val: number) => val === 0 || val === 1).length;
+          const binaryRatio = binaryCount / numericValues.length;
+          
+          console.log(`   - Binary ratio: ${(binaryRatio * 100).toFixed(1)}%`);
+          
+          if (binaryRatio >= 0.8) {
+            console.log(`   - 🎯 PROPORTION: ≥80% binary values`);
+            isActuallyContinuous = false;
+          } else {
+            console.log(`   - 🎯 CONTINUOUS: <80% binary values`);
+            isActuallyContinuous = true;
+          }
+        }
+      } else {
+        console.log(`📊 INLINE DETECTION: Non-numeric or empty data, defaulting to continuous`);
+      }
+      
+      // Update the state to match the inline detection result
+      if (isActuallyContinuous !== isMetricContinuous) {
+        console.log(`🔄 UPDATING STATE: isMetricContinuous ${isMetricContinuous} → ${isActuallyContinuous}`);
+        setIsMetricContinuous(isActuallyContinuous);
+      }
+      
+      if (isActuallyContinuous) {
         // Process continuous data
       data.forEach((row: any) => {
         const group = row[groupingColumn];
@@ -1024,11 +1110,11 @@ const StatisticalAnalysis: React.FC = () => {
         type: 'calculateStats',
         data: { 
           groupData,
-          isProportionMetric: !isMetricContinuous 
+          isProportionMetric: !isActuallyContinuous 
         }
       });
       
-      if (isMetricContinuous) {
+      if (isActuallyContinuous) {
         statsWorker.postMessage({
           type: 'calculateLeveneTest',
           data: { groupData }
@@ -1371,9 +1457,30 @@ const StatisticalAnalysis: React.FC = () => {
   };
 
   const tCDF = (t: number, df: number): number => {
-    // Approximation for t-distribution CDF
-    const x = df / (df + t * t);
-    return 0.5 + (t > 0 ? 0.5 : -0.5) * incompleteBeta(x, df/2, 0.5);
+    // Use jStat's t-distribution CDF if available (most accurate)
+    try {
+      if ((jStat as any).studentt && (jStat as any).studentt.cdf) {
+        return (jStat as any).studentt.cdf(t, df);
+      }
+    } catch (error) {
+      console.warn('jStat t-distribution CDF not available, using manual calculation');
+    }
+    
+    // Manual calculation using incomplete beta function
+    // For t-distribution: P(T ≤ t) = 0.5 + (t / sqrt(df)) * B_x(1/2, df/2) / B(1/2, df/2)
+    // where x = t^2 / (t^2 + df) and B_x is the incomplete beta function
+    
+    if (df <= 0) return 0.5;
+    if (t === 0) return 0.5;
+    
+    const x = t * t / (t * t + df);
+    const betaValue = incompleteBeta(x, 0.5, df / 2);
+    
+    if (t > 0) {
+      return 0.5 + 0.5 * betaValue;
+    } else {
+      return 0.5 - 0.5 * betaValue;
+    }
   };
 
   const fCDF = (f: number, df1: number, df2: number): number => {
@@ -1818,7 +1925,7 @@ const StatisticalAnalysis: React.FC = () => {
     if (!highPrecisionNeeded) {
       groupsToCheck.forEach(group => {
         const stats = groupStats[group];
-        if (stats && (Math.abs(stats.skewness) > 1.5 || Math.abs(stats.kurtosis) > 7)) {
+        if (stats && (Math.abs(stats.skewness) > 2 || Math.abs(stats.kurtosis) > 7)) {
           autoDetectedHighPrecision = true;
         }
       });
