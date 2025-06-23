@@ -2027,35 +2027,64 @@ const StatisticalAnalysis: React.FC = () => {
   }, [fileName, metricColumn, groupingColumn, groupStats, testRecommendation]);
 
   // Add CUPED calculation function with enhanced variance tracking
-  const calculateCUPED = useCallback((metricData: number[], covariateData: number[]): { 
+  const calculateCUPED = useCallback((metricData: number[], covariateData: number[], groupData: number[]): { 
     adjustedMetric: number[], 
     theta: number,
     originalVariance: number,
     adjustedVariance: number,
     varianceReduction: number 
   } => {
-    if (metricData.length !== covariateData.length) {
-      throw new Error('Metric and covariate data must have the same length');
+    if (metricData.length !== covariateData.length || metricData.length !== groupData.length) {
+      throw new Error('Metric, covariate, and group data must have the same length');
     }
 
-    // Calculate theta (covariance / variance)
-    const metricMean = metricData.reduce((a, b) => a + b, 0) / metricData.length;
-    const covariateMean = covariateData.reduce((a, b) => a + b, 0) / covariateData.length;
+    // ⚠️ WARNING: Current implementation uses ALL data for theta calculation
+    // CUPED best practice: Use only CONTROL group (path == 0) for theta calculation
+    console.warn("🚨 CUPED IMPLEMENTATION WARNING: Using ALL data for theta calculation instead of control group only!");
+    console.log("Current theta calculation includes both control and treatment groups");
+    console.log("Recommended: Filter to control group only (e.g., path == 0) before theta calculation");
+
+    // Filter to control group only (assuming group 0 is control - adapt as needed)
+    const controlGroupId = Math.min(...groupData); // Assume lowest ID is control
+    const controlIndices = groupData.map((group, index) => group === controlGroupId ? index : -1).filter(i => i !== -1);
     
-    const covariance = metricData.reduce((sum, val, i) => 
-      sum + (val - metricMean) * (covariateData[i] - covariateMean), 0) / metricData.length;
+    console.log(`Control group identified as: ${controlGroupId}`);
+    console.log(`Using ${controlIndices.length} control observations out of ${metricData.length} total for theta calculation`);
     
-    const covariateVariance = covariateData.reduce((sum, val) => 
-      sum + Math.pow(val - covariateMean, 2), 0) / covariateData.length;
+    if (controlIndices.length === 0) {
+      throw new Error('No control group data found for CUPED theta calculation');
+    }
+
+    // Extract control group data for theta calculation
+    const controlMetricData = controlIndices.map(i => metricData[i]);
+    const controlCovariateData = controlIndices.map(i => covariateData[i]);
+
+    // Calculate theta using ONLY control group data (covariance / variance)
+    const controlMetricMean = controlMetricData.reduce((a, b) => a + b, 0) / controlMetricData.length;
+    const controlCovariateMean = controlCovariateData.reduce((a, b) => a + b, 0) / controlCovariateData.length;
+    
+    const covariance = controlMetricData.reduce((sum, val, i) => 
+      sum + (val - controlMetricMean) * (controlCovariateData[i] - controlCovariateMean), 0) / controlMetricData.length;
+    
+    const covariateVariance = controlCovariateData.reduce((sum, val) => 
+      sum + Math.pow(val - controlCovariateMean, 2), 0) / controlCovariateData.length;
     
     const theta = covariance / covariateVariance;
 
-    // Calculate adjusted metric
+    // For X_mean, we can use control group mean (more conservative) or overall mean
+    // Using control group mean for consistency
+    const X_mean = controlCovariateMean;
+    
+    console.log("X mean used for CUPED adjustment:", X_mean.toFixed(4), " - From control only: YES");
+    console.log("Theta calculated from control group only:", theta.toFixed(4));
+
+    // Calculate adjusted metric for ALL observations using theta from control
     const adjustedMetric = metricData.map((val, i) => 
-      val - theta * (covariateData[i] - covariateMean)
+      val - theta * (covariateData[i] - X_mean)
     );
 
     // Calculate variances
+    const metricMean = metricData.reduce((a, b) => a + b, 0) / metricData.length;
     const originalVar = metricData.reduce((sum, val) => sum + Math.pow(val - metricMean, 2), 0) / metricData.length;
     
     const adjustedMean = adjustedMetric.reduce((a, b) => a + b, 0) / adjustedMetric.length;
@@ -2103,7 +2132,11 @@ const StatisticalAnalysis: React.FC = () => {
           try {
             const metricData = alignedData.map(item => item.metric);
             const covariateData = alignedData.map(item => item.covariate);
-            cupedResult = calculateCUPED(metricData, covariateData);
+            // Convert group strings to numeric IDs for CUPED calculation
+            const uniqueGroups = Array.from(new Set(alignedData.map(item => item.group)));
+            const groupMapping = Object.fromEntries(uniqueGroups.map((group, index) => [group, index]));
+            const groupData = alignedData.map(item => groupMapping[item.group]);
+            cupedResult = calculateCUPED(metricData, covariateData, groupData);
             console.log(`CUPED applied successfully. Variance reduction: ${cupedResult.varianceReduction.toFixed(2)}%`);
           } catch (error) {
             console.error('Error calculating CUPED:', error);
