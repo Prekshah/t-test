@@ -24,7 +24,9 @@ import {
   Theme,
   BoxProps,
   FormHelperText,
-  AlertTitle
+  AlertTitle,
+  FormControlLabel,
+  Switch
 } from '@mui/material';
 import { styled } from '@mui/material/styles';
 import { parse } from 'papaparse';
@@ -116,6 +118,7 @@ interface PostHocResult {
   pValue: number;
   adjustedPValue: number;
   isSignificant: boolean;
+  bootstrapResult?: BootstrapResult; // Add optional bootstrap result for post-hoc pairs
 }
 
 interface TabPanelProps extends BoxProps {
@@ -390,6 +393,7 @@ const StatisticalAnalysis: React.FC = () => {
   const [isRunningPostHoc, setIsRunningPostHoc] = useState(false);
   const [isCovariateListExpanded, setIsCovariateListExpanded] = useState(false);
   const [bootstrapResult, setBootstrapResult] = useState<BootstrapResult | null>(null);
+  const [needHighPrecisionCI, setNeedHighPrecisionCI] = useState<boolean>(false); // Flag for high-precision CI requirement
   const workerTimeoutRef = useRef<NodeJS.Timeout | null>(null);
 
   // Calculate Pearson correlation coefficient
@@ -1723,54 +1727,159 @@ const StatisticalAnalysis: React.FC = () => {
     };
   }, []);
 
-  // Check if bootstrapping should be applied
-  const shouldApplyBootstrap = useCallback((testResult: TestResult, groupStats: GroupStats): { shouldApply: boolean; reason: string } => {
-    // Check conditions for bootstrapping
-    const conditions = {
-      isContinuous: isMetricContinuous,
-      twoGroups: Object.keys(groupStats).length === 2,
-      borderlinePValue: testResult.pValue >= 0.04 && testResult.pValue <= 0.06,
-      hasSkewness: false
-    };
+  /**
+   * COMPREHENSIVE BOOTSTRAPPING DECISION LOGIC
+   * 
+   * This function determines when bootstrapping should be applied according to our formal decision canvas:
+   * 
+   * RULES FOR BOOTSTRAPPING:
+   * ✅ ONLY for continuous metrics comparing means (when mean is reliable)
+   * ✅ TRIGGERED when ANY of these conditions are true:
+   *    1. Primary statistical test has borderline p-value (0.04 ≤ p ≤ 0.06)
+   *    2. High-precision confidence interval is needed (flag or derived from variance/skew)
+   * 
+   * ❌ NEVER TRIGGERED when:
+   *    - Metric type is proportion/categorical
+   *    - Using fallback plan (unreliable means → Mann-Whitney U or Kruskal-Wallis)
+   * 
+   * ✅ ALLOWED FOR:
+   *    - 2 groups using mean-based tests + conditions met
+   *    - 3+ groups on pairwise post-hoc comparisons if conditions apply to that pair
+   * 
+   * KEY CHECKS:
+   *    - metricType === 'continuous'
+   *    - Mean reliability (trimmed mean logic)
+   *    - Test type: Welch's t-test, Two-Sample t-test, Welch's ANOVA, ANOVA
+   *    - Borderline p-value OR needHighPrecisionCI flag
+   * 
+   * EDGE CASES:
+   *    - Post-hoc pairs evaluated individually for bootstrapping eligibility
+   *    - Different pairs may have different bootstrap decisions
+   *    - Bootstrap results stored per pair for 3+ groups
+   */
+  const shouldApplyBootstrap = useCallback((
+    testResult: TestResult, 
+    groupStats: GroupStats, 
+    pairStats?: { groupA: string; groupB: string; pValue: number }
+  ): { shouldApply: boolean; reason: string } => {
     
-    // Check for skewness in either group
-    Object.values(groupStats).forEach(stats => {
-      if (Math.abs(stats.skewness) > 1.5) {
-        conditions.hasSkewness = true;
+    const testName = testResult.testName;
+    const evaluatingPair = pairStats ? `${pairStats.groupA} vs ${pairStats.groupB}` : 'primary test';
+    const pValue = pairStats ? pairStats.pValue : testResult.pValue;
+    
+    console.log(`\n=== BOOTSTRAP CONDITIONS CHECK: ${evaluatingPair} ===`);
+    console.log(`Test: ${testName}, p-value: ${pValue.toFixed(4)}`);
+    
+    // 1. CHECK: Must be continuous metric
+    if (!isMetricContinuous) {
+      console.log('❌ Bootstrap not applicable: metric is not continuous (proportion/categorical)');
+      return { shouldApply: false, reason: '' };
+    }
+    
+    // 2. CHECK: Must be using mean-based tests (not fallback plan)
+    const meanBasedTests = [
+      "Two-Sample t-Test", 
+      "Welch's t-Test", 
+      "One-way ANOVA", 
+      "Welch's ANOVA"
+    ];
+    const isMeanBasedTest = meanBasedTests.includes(testName);
+    
+    if (!isMeanBasedTest) {
+      console.log(`❌ Bootstrap not applicable: using fallback plan (${testName}) - means deemed unreliable`);
+      return { shouldApply: false, reason: '' };
+    }
+    
+    // 3. CHECK: Mean reliability for groups involved
+    const groupsToCheck = pairStats ? [pairStats.groupA, pairStats.groupB] : Object.keys(groupStats);
+    let allMeansReliable = true;
+    
+    groupsToCheck.forEach(group => {
+      const stats = groupStats[group];
+      if (stats) {
+        const reliability = checkMeanReliability(stats);
+        if (!reliability.isReliable) {
+          console.log(`❌ Bootstrap not applicable: mean unreliable for group ${group} - ${reliability.reasons.join(', ')}`);
+          allMeansReliable = false;
+        }
       }
     });
     
-    console.log('=== BOOTSTRAP CONDITIONS CHECK ===');
-    console.log('Conditions:', conditions);
-    console.log(`Primary test: ${testResult.testName}, p-value: ${testResult.pValue.toFixed(4)}`);
-    
-    if (!conditions.isContinuous) {
-      console.log('❌ Bootstrap not applicable: metric is not continuous');
+    if (!allMeansReliable) {
       return { shouldApply: false, reason: '' };
     }
     
-    if (!conditions.twoGroups) {
-      console.log('❌ Bootstrap not applicable: not exactly two groups');
+    // 4. CHECK: Triggering conditions
+    const borderlinePValue = pValue >= 0.04 && pValue <= 0.06;
+    const highPrecisionNeeded = needHighPrecisionCI;
+    
+    // Auto-detect high precision need from variance/skew if not explicitly set
+    let autoDetectedHighPrecision = false;
+    if (!highPrecisionNeeded) {
+      groupsToCheck.forEach(group => {
+        const stats = groupStats[group];
+        if (stats && (Math.abs(stats.skewness) > 1.5 || Math.abs(stats.kurtosis) > 7)) {
+          autoDetectedHighPrecision = true;
+        }
+      });
+    }
+    
+    const shouldTrigger = borderlinePValue || highPrecisionNeeded || autoDetectedHighPrecision;
+    
+    if (!shouldTrigger) {
+      console.log(`❌ Bootstrap not triggered:`);
+      console.log(`   - Borderline p-value (0.04-0.06): ${borderlinePValue} (actual: ${pValue.toFixed(4)})`);
+      console.log(`   - High precision CI needed: ${highPrecisionNeeded || autoDetectedHighPrecision}`);
       return { shouldApply: false, reason: '' };
     }
     
-    if (!conditions.borderlinePValue) {
-      console.log(`❌ Bootstrap not applicable: p-value (${testResult.pValue.toFixed(4)}) not in borderline range [0.04, 0.06]`);
-      return { shouldApply: false, reason: '' };
+    // ✅ ALL CONDITIONS MET - DETERMINE REASON
+    let reason = '';
+    if (borderlinePValue && (highPrecisionNeeded || autoDetectedHighPrecision)) {
+      reason = `Bootstrapping applied for ${evaluatingPair} due to borderline p-value (${pValue.toFixed(4)}) AND high-precision CI requirements (skewed/kurtotic data).`;
+    } else if (borderlinePValue) {
+      reason = `Bootstrapping applied for ${evaluatingPair} due to borderline p-value (${pValue.toFixed(4)}) requiring robust confidence interval validation.`;
+    } else {
+      reason = `Bootstrapping applied for ${evaluatingPair} due to high-precision CI requirements from data characteristics (skewness/kurtosis).`;
     }
     
-    if (!conditions.hasSkewness) {
-      console.log('❌ Bootstrap not applicable: data not sufficiently skewed');
-      return { shouldApply: false, reason: '' };
-    }
-    
-    const reason = `Bootstrapping was applied due to a borderline primary p-value (${testResult.pValue.toFixed(4)}) and skewed data distribution. This provides a more robust confidence interval for the mean difference.`;
-    
-    console.log('✅ All conditions met for bootstrapping');
-    console.log('=== END BOOTSTRAP CONDITIONS CHECK ===');
+    console.log('✅ All bootstrap conditions met!');
+    console.log(`   - Continuous metric: ✓`);
+    console.log(`   - Mean-based test: ✓ (${testName})`);
+    console.log(`   - Reliable means: ✓`);
+    console.log(`   - Trigger condition: ✓ (${borderlinePValue ? 'borderline p-value' : 'high precision needed'})`);
+    console.log(`=== END BOOTSTRAP CONDITIONS CHECK ===\n`);
     
     return { shouldApply: true, reason };
-  }, [isMetricContinuous]);
+  }, [isMetricContinuous, needHighPrecisionCI, checkMeanReliability]);
+
+  // Helper function to evaluate bootstrapping for post-hoc pairs
+  const evaluatePostHocBootstrap = useCallback((
+    groupA: string,
+    groupB: string,
+    pValue: number,
+    groupData: { [key: string]: number[] },
+    testResult: TestResult
+  ): BootstrapResult | undefined => {
+    
+    const pairStats = { groupA, groupB, pValue };
+    const bootstrapCheck = shouldApplyBootstrap(testResult, groupStats, pairStats);
+    
+    if (bootstrapCheck.shouldApply) {
+      console.log(`🎯 Bootstrapping triggered for post-hoc pair ${groupA} vs ${groupB} due to: ${bootstrapCheck.reason}`);
+      
+      const group1Data = groupData[groupA];
+      const group2Data = groupData[groupB];
+      
+      if (group1Data && group2Data) {
+        const bootstrapResult = performBootstrap(group1Data, group2Data);
+        bootstrapResult.reason = bootstrapCheck.reason;
+        return bootstrapResult;
+      }
+    }
+    
+    return undefined;
+  }, [shouldApplyBootstrap, groupStats, performBootstrap]);
 
   // Mann-Whitney U Test implementation
   const runMannWhitneyUTest = useCallback((group1Data: number[], group2Data: number[]): TestResult => {
@@ -2251,13 +2360,14 @@ const StatisticalAnalysis: React.FC = () => {
 
       // Check if bootstrapping should be applied
       if (result && Object.keys(groupStats).length > 0) {
-        const bootstrapCheck = shouldApplyBootstrap(result, groupStats);
-        if (bootstrapCheck.shouldApply) {
-          console.log('🎯 Bootstrapping conditions met - running bootstrap analysis');
-          
-          // Get the two groups for bootstrapping
-          const groupNames = Object.keys(groupData);
-          if (groupNames.length === 2) {
+        const groupNames = Object.keys(groupData);
+        
+        if (groupNames.length === 2) {
+          // Handle 2-group bootstrapping
+          const bootstrapCheck = shouldApplyBootstrap(result, groupStats);
+          if (bootstrapCheck.shouldApply) {
+            console.log('🎯 Bootstrapping conditions met for 2-group comparison - running bootstrap analysis');
+            
             const group1Data = groupData[groupNames[0]];
             const group2Data = groupData[groupNames[1]];
             
@@ -2266,12 +2376,17 @@ const StatisticalAnalysis: React.FC = () => {
             bootstrapResult.reason = bootstrapCheck.reason;
             
             setBootstrapResult(bootstrapResult);
-            console.log('✅ Bootstrap analysis completed and results stored');
+            console.log('✅ Bootstrap analysis completed and results stored for 2-group comparison');
+          } else {
+            // Clear any previous bootstrap results
+            setBootstrapResult(null);
+            console.log('❌ Bootstrap conditions not met for 2-group comparison - clearing previous results');
           }
-        } else {
-          // Clear any previous bootstrap results
+        } else if (groupNames.length > 2) {
+          // For 3+ groups, bootstrapping is handled within post-hoc tests
+          // Clear primary bootstrap result as it's not applicable for multi-group
           setBootstrapResult(null);
-          console.log('❌ Bootstrap conditions not met - clearing previous results');
+          console.log(`📊 Multi-group comparison (${groupNames.length} groups) - bootstrapping will be evaluated per post-hoc pair`);
         }
       }
     } catch (error) {
@@ -2283,7 +2398,7 @@ const StatisticalAnalysis: React.FC = () => {
   }, [testRecommendation, data, metricColumn, groupingColumn, isMetricContinuous, covariateAnalysis, calculateCUPED, runTwoSampleTTest, runOneWayANOVA, runWelchsANOVA, runMannWhitneyUTest, runKruskalWallisTest, runTwoProportionZTest, runChiSquareTest, markTestExecuted]);
 
   // Post-hoc test functions
-  const runTukeyHSD = useCallback((groupData: { [key: string]: number[] }): PostHocResult[] => {
+  const runTukeyHSD = useCallback((groupData: { [key: string]: number[] }, testResult?: TestResult): PostHocResult[] => {
     const groupNames = Object.keys(groupData);
     const results: PostHocResult[] = [];
     
@@ -2323,22 +2438,30 @@ const StatisticalAnalysis: React.FC = () => {
         const qCritical = 3.64; // Approximate q-value for 3+ groups, alpha=0.05
         
         const isSignificant = qStat > qCritical;
+        const pValue = isSignificant ? 0.01 : 0.10; // Simplified p-value approximation
+        
+        // Evaluate bootstrapping for this pairwise comparison
+        let bootstrapResult: BootstrapResult | undefined;
+        if (testResult) {
+          bootstrapResult = evaluatePostHocBootstrap(groupA, groupB, pValue, groupData, testResult);
+        }
         
         results.push({
           groupA,
           groupB,
           testStatistic: qStat,
-          pValue: isSignificant ? 0.01 : 0.10, // Simplified p-value approximation
-          adjustedPValue: isSignificant ? 0.01 : 0.10,
-          isSignificant
+          pValue,
+          adjustedPValue: pValue,
+          isSignificant,
+          bootstrapResult
         });
       }
     }
     
     return results;
-  }, []);
+  }, [evaluatePostHocBootstrap]);
 
-  const runGamesHowell = useCallback((groupData: { [key: string]: number[] }): PostHocResult[] => {
+  const runGamesHowell = useCallback((groupData: { [key: string]: number[] }, testResult?: TestResult): PostHocResult[] => {
     const groupNames = Object.keys(groupData);
     const results: PostHocResult[] = [];
     
@@ -2373,21 +2496,28 @@ const StatisticalAnalysis: React.FC = () => {
         const numComparisons = (groupNames.length * (groupNames.length - 1)) / 2;
         const adjustedPValue = Math.min(1.0, pValue * numComparisons);
         
+        // Evaluate bootstrapping for this pairwise comparison
+        let bootstrapResult: BootstrapResult | undefined;
+        if (testResult) {
+          bootstrapResult = evaluatePostHocBootstrap(groupA, groupB, pValue, groupData, testResult);
+        }
+        
         results.push({
           groupA,
           groupB,
           testStatistic: tStat,
           pValue,
           adjustedPValue,
-          isSignificant: adjustedPValue < 0.05
+          isSignificant: adjustedPValue < 0.05,
+          bootstrapResult
         });
       }
     }
     
     return results;
-  }, [tCDF]);
+  }, [tCDF, evaluatePostHocBootstrap]);
 
-  const runDunnTest = useCallback((groupData: { [key: string]: number[] }): PostHocResult[] => {
+  const runDunnTest = useCallback((groupData: { [key: string]: number[] }, testResult?: TestResult): PostHocResult[] => {
     const groupNames = Object.keys(groupData);
     const results: PostHocResult[] = [];
     
@@ -2437,6 +2567,9 @@ const StatisticalAnalysis: React.FC = () => {
         const numComparisons = (groupNames.length * (groupNames.length - 1)) / 2;
         const adjustedPValue = Math.min(1.0, pValue * numComparisons);
         
+        // Note: Dunn test is rank-based, so bootstrapping is not applicable
+        // This is a fallback test for unreliable means, so no bootstrap evaluation
+        
         results.push({
           groupA,
           groupB,
@@ -2444,6 +2577,7 @@ const StatisticalAnalysis: React.FC = () => {
           pValue,
           adjustedPValue,
           isSignificant: adjustedPValue < 0.05
+          // No bootstrapResult - Dunn test indicates unreliable means (fallback plan)
         });
       }
     }
@@ -2599,19 +2733,19 @@ const StatisticalAnalysis: React.FC = () => {
 
       switch (testRecommendation.testName) {
         case "One-way ANOVA":
-          console.log('Executing Tukey HSD...');
-          results = runTukeyHSD(groupData);
+          console.log('Executing Tukey HSD with bootstrap evaluation...');
+          results = runTukeyHSD(groupData, testResult);
           break;
         case "Welch's ANOVA":
-          console.log('Executing Games-Howell...');
-          results = runGamesHowell(groupData);
+          console.log('Executing Games-Howell with bootstrap evaluation...');
+          results = runGamesHowell(groupData, testResult);
           break;
         case "Kruskal-Wallis Test":
-          console.log('Executing Dunn Test...');
-          results = runDunnTest(groupData);
+          console.log('Executing Dunn Test (no bootstrap - rank-based)...');
+          results = runDunnTest(groupData, testResult);
           break;
         case "Chi-Square Test for Independence":
-          console.log('Executing Pairwise Proportion Tests...');
+          console.log('Executing Pairwise Proportion Tests (no bootstrap - categorical)...');
           results = runPairwiseProportionTests(groupData);
           break;
         default:
@@ -2876,6 +3010,39 @@ const StatisticalAnalysis: React.FC = () => {
                   ))}
                 </Select>
               </FormControl>
+
+              {/* High Precision CI Toggle for Bootstrapping */}
+              {isMetricContinuous && metricColumn && groupingColumn && (
+                <Paper sx={{ p: 2, mb: 2, bgcolor: '#f8f9fa', border: '1px solid #e0e0e0' }}>
+                  <FormControlLabel
+                    control={
+                      <Switch
+                        checked={needHighPrecisionCI}
+                        onChange={(e) => setNeedHighPrecisionCI(e.target.checked)}
+                        sx={{
+                          '& .MuiSwitch-switchBase.Mui-checked': {
+                            color: '#1976d2'
+                          },
+                          '& .MuiSwitch-switchBase.Mui-checked + .MuiSwitch-track': {
+                            backgroundColor: '#1976d2'
+                          }
+                        }}
+                      />
+                    }
+                    label={
+                      <Box>
+                        <Typography variant="body2" sx={{ fontWeight: 600, color: '#1976d2' }}>
+                          🎯 Request High-Precision Confidence Intervals
+                        </Typography>
+                        <Typography variant="caption" sx={{ color: '#666', display: 'block', mt: 0.5 }}>
+                          Forces bootstrap analysis for more robust confidence intervals when comparing means.
+                          Automatically enabled for borderline p-values or highly skewed data.
+                        </Typography>
+                      </Box>
+                    }
+                  />
+                </Paper>
+              )}
 
               {metricColumn && groupingColumn && (
                 <Box>
@@ -3412,7 +3579,8 @@ const StatisticalAnalysis: React.FC = () => {
                           )}
                           <TableCell>P-value</TableCell>
                           <TableCell>Adjusted P-value</TableCell>
-                            <TableCell>Significant?</TableCell>
+                          <TableCell>Significant?</TableCell>
+                          <TableCell>Bootstrap CI</TableCell>
                         </TableRow>
                       </TableHead>
                       <TableBody>
@@ -3485,6 +3653,25 @@ const StatisticalAnalysis: React.FC = () => {
                                     </Box>
                               )}
                             </TableCell>
+                            <TableCell>
+                              {result.bootstrapResult ? (
+                                <Box>
+                                  <Typography variant="body2" sx={{ color: '#1976d2', fontWeight: 600 }}>
+                                    🎯 [{result.bootstrapResult.meanDifferenceCI[0].toFixed(3)}, {result.bootstrapResult.meanDifferenceCI[1].toFixed(3)}]
+                                  </Typography>
+                                  <Typography variant="caption" sx={{ color: '#666', display: 'block' }}>
+                                    Bootstrap p-val: {result.bootstrapResult.bootstrapPValue.toFixed(4)}
+                                  </Typography>
+                                  <Typography variant="caption" sx={{ color: '#666', display: 'block', fontStyle: 'italic' }}>
+                                    {result.bootstrapResult.numResamples.toLocaleString()} resamples
+                                  </Typography>
+                                </Box>
+                              ) : (
+                                <Typography variant="body2" sx={{ color: '#999', fontStyle: 'italic' }}>
+                                  Not applied
+                                </Typography>
+                              )}
+                            </TableCell>
                           </TableRow>
                             );
                           })}
@@ -3512,6 +3699,31 @@ const StatisticalAnalysis: React.FC = () => {
                         })()}
                       </Typography>
                     </Alert>
+
+                    {/* Bootstrap Summary for Post-Hoc Results */}
+                    {(() => {
+                      const bootstrapPairs = postHocResults.filter(r => r.bootstrapResult);
+                      if (bootstrapPairs.length > 0) {
+                        return (
+                          <Alert severity="info" sx={{ mt: 2 }}>
+                            <Typography variant="body1" sx={{ fontWeight: 600, mb: 1 }}>
+                              🎯 Bootstrap Analysis Applied to {bootstrapPairs.length} Post-Hoc Pair{bootstrapPairs.length > 1 ? 's' : ''}
+                            </Typography>
+                            <Typography variant="body2">
+                              Bootstrap confidence intervals were computed for pairs meeting trigger conditions:
+                            </Typography>
+                            <Box sx={{ ml: 2, mt: 1 }}>
+                              {bootstrapPairs.map((pair, index) => (
+                                <Typography key={index} variant="body2" sx={{ mb: 0.5 }}>
+                                  • <strong>{pair.groupA} vs {pair.groupB}:</strong> {pair.bootstrapResult?.reason}
+                                </Typography>
+                              ))}
+                            </Box>
+                          </Alert>
+                        );
+                      }
+                      return null;
+                    })()}
 
                     {/* Export Results Button */}
                     <Box sx={{ mt: 3, display: 'flex', justifyContent: 'center' }}>
