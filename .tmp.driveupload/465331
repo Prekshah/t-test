@@ -1,0 +1,17 @@
+Scenario: scenario18
+Metric Column: metric
+Grouping Column: group
+Number of Groups: 4
+Selected Test: Welch's ANOVA
+Test Statistic: 953.3668
+p-value: 0.0000
+Interpretation: Reject Null Hypothesis
+Post-Hoc Test: Games-Howell test
+
+Post-Hoc Results:
+1. Group A vs Group B: p-adj = 1.0000 (Not Significant)
+2. Group A vs Group C: p-adj = 1.0000 (Not Significant)
+3. Group A vs Group D: p-adj = 1.0000 (Not Significant)
+4. Group B vs Group C: p-adj = 1.0000 (Not Significant)
+5. Group B vs Group D: p-adj = 1.0000 (Not Significant)
+6. Group C vs Group D: p-adj = 1.0000 (Not Significant)

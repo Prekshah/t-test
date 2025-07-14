@@ -1,0 +1,9 @@
+Scenario: scenario12
+Metric Column: metric
+Grouping Column: group
+Number of Groups: 4
+Selected Test: Chi-Square Test for Independence
+Test Statistic: 0.0000
+p-value: 1.0000
+Interpretation: Fail to Reject Null Hypothesis
+Post-Hoc Test: N/A

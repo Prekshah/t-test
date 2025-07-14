@@ -1,0 +1,9 @@
+Scenario: scenario11
+Metric Column: metric
+Grouping Column: group
+Number of Groups: 2
+Selected Test: Two-Proportion Z-Test
+Test Statistic: -9.4963
+p-value: 0.0000
+Interpretation: Reject Null Hypothesis
+Post-Hoc Test: N/A

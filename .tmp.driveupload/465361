@@ -1,0 +1,9 @@
+Scenario: scenario13
+Metric Column: metric
+Grouping Column: group
+Number of Groups: 2
+Selected Test: Two-Sample t-Test
+Test Statistic: -0.1353
+p-value: 0.1076
+Interpretation: Fail to Reject Null Hypothesis
+Post-Hoc Test: N/A

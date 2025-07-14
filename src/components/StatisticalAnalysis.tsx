@@ -395,6 +395,9 @@ const StatisticalAnalysis: React.FC = () => {
   const [bootstrapResult, setBootstrapResult] = useState<BootstrapResult | null>(null);
   const [needHighPrecisionCI, setNeedHighPrecisionCI] = useState<boolean>(false); // Flag for high-precision CI requirement
   const workerTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  // 1. Add state for CUPED toggle
+  const [applyCUPED, setApplyCUPED] = useState<boolean>(true);
+  const [cachedCupedResult, setCachedCupedResult] = useState<any>(null);
 
   // Calculate Pearson correlation coefficient
   const calculatePearsonCorrelation = useCallback((x: number[], y: number[]): number => {
@@ -2322,54 +2325,62 @@ const StatisticalAnalysis: React.FC = () => {
     if (!testRecommendation || !data.length || !metricColumn || !groupingColumn) return;
 
     setIsRunningTest(true);
-
-    try {
-      const groupData: { [key: string]: number[] } = {};
-      let cupedResult: { 
-        adjustedMetric: number[], 
-        theta: number, 
-        originalVariance: number,
-        adjustedVariance: number,
-        varianceReduction: number 
-      } | null = null;
+    setTimeout(() => {
+      let useCuped = false;
+      let cupedOverride = false;
       
-      // Process data and apply CUPED if applicable
-      if (isMetricContinuous && covariateAnalysis?.selectedCovariate) {
-        console.log(`Applying CUPED with automatically selected covariate: ${covariateAnalysis.selectedCovariate}`);
+      // Check if CUPED should be applied
+      if (covariateAnalysis && covariateAnalysis.selectedCovariate && isMetricContinuous && applyCUPED && columns.includes(covariateAnalysis.selectedCovariate)) {
+        // Check if this is a mean-based test (ideal for CUPED)
+        const meanBasedTests = ["Two-Sample t-Test", "Welch's t-Test", "One-way ANOVA", "Welch's ANOVA"];
+        const isMeanBasedTest = meanBasedTests.includes(testRecommendation.testName);
         
-        // Extract metric and covariate data in aligned fashion
+        if (isMeanBasedTest) {
+          useCuped = true;
+        } else {
+          // Non-parametric test recommended, but user wants CUPED
+          // Allow CUPED override but warn about it
+          useCuped = true;
+          cupedOverride = true;
+          console.warn(`🚨 CUPED OVERRIDE: Applying CUPED to ${testRecommendation.testName} (non-parametric test)`);
+          console.warn("This is not the ideal use case for CUPED, but proceeding as requested");
+        }
+      }
+      let cupedResult = cachedCupedResult;
+      // Compute CUPED if needed and not cached
+          if (useCuped && !cupedResult) {
+      try {
+        if (!covariateAnalysis || !covariateAnalysis.selectedCovariate) return;
+        const covariateColumn = covariateAnalysis.selectedCovariate as string;
         const alignedData = data.map(row => ({
           metric: parseFloat(String(row[metricColumn])),
-          covariate: parseFloat(String(row[covariateAnalysis.selectedCovariate!])),
+          covariate: parseFloat(String(row[covariateColumn])),
           group: String(row[groupingColumn])
         })).filter(item => !isNaN(item.metric) && !isNaN(item.covariate));
-        
-        if (alignedData.length > 0) {
-          try {
+          if (alignedData.length > 0) {
             const metricData = alignedData.map(item => item.metric);
             const covariateData = alignedData.map(item => item.covariate);
-            // Convert group strings to numeric IDs for CUPED calculation
             const uniqueGroups = Array.from(new Set(alignedData.map(item => item.group)));
             const groupMapping = Object.fromEntries(uniqueGroups.map((group, index) => [group, index]));
             const groupData = alignedData.map(item => groupMapping[item.group]);
             cupedResult = calculateCUPED(metricData, covariateData, groupData);
-            console.log(`CUPED applied successfully. Variance reduction: ${cupedResult.varianceReduction.toFixed(2)}%`);
-          } catch (error) {
-            console.error('Error calculating CUPED:', error);
-            cupedResult = null;
+            setCachedCupedResult(cupedResult);
           }
+        } catch (error) {
+          console.error('Error calculating CUPED:', error);
+          cupedResult = null;
         }
       }
-
-      // Process data for each group
-      if (cupedResult) {
-        // Use CUPED-adjusted metric
-        const alignedData = data.map(row => ({
-          metric: parseFloat(String(row[metricColumn])),
-          covariate: parseFloat(String(row[covariateAnalysis!.selectedCovariate!])),
-          group: String(row[groupingColumn])
-        })).filter(item => !isNaN(item.metric) && !isNaN(item.covariate));
-        
+      // Build group data for test
+      const groupData: { [key: string]: number[] } = {};
+          if (useCuped && cupedResult) {
+      if (!covariateAnalysis || !covariateAnalysis.selectedCovariate) return;
+      const covariateColumn = covariateAnalysis.selectedCovariate as string;
+      const alignedData = data.map(row => ({
+        metric: parseFloat(String(row[metricColumn])),
+        covariate: parseFloat(String(row[covariateColumn])),
+        group: String(row[groupingColumn])
+      })).filter(item => !isNaN(item.metric) && !isNaN(item.covariate));
         alignedData.forEach((item, index) => {
           const adjustedValue = cupedResult!.adjustedMetric[index];
           if (!groupData[item.group]) {
@@ -2378,31 +2389,24 @@ const StatisticalAnalysis: React.FC = () => {
           groupData[item.group].push(adjustedValue);
         });
       } else {
-        // Use original metric
         data.forEach((row: any) => {
           const group = row[groupingColumn];
           let value: number;
-          
           if (isMetricContinuous) {
             value = parseFloat(row[metricColumn]);
           } else {
-            // Handle categorical data
             const rawValue = String(row[metricColumn]).trim().toLowerCase();
             const allMetricValues = data.map((r: DataRow) => String(r[metricColumn] || '').trim().toLowerCase());
             const uniqueMetricValues = Array.from(new Set(allMetricValues)).filter(val => val !== '' && val !== 'null' && val !== 'undefined');
-            
             const successValues = ['1', 'yes', 'true', 'success', 'pass', 'positive', 'pos', 'high', 'good', 'click', 'convert', 'purchased'];
             let successCategory = uniqueMetricValues.find(val => successValues.includes(val as string));
-            
             if (!successCategory && uniqueMetricValues.length === 2) {
               successCategory = uniqueMetricValues.sort()[1];
             } else if (!successCategory && uniqueMetricValues.length > 0) {
               successCategory = uniqueMetricValues[0];
             }
-            
             value = rawValue === successCategory ? 1 : 0;
           }
-          
           if (!isNaN(value)) {
             if (!groupData[group]) {
               groupData[group] = [];
@@ -2411,98 +2415,74 @@ const StatisticalAnalysis: React.FC = () => {
           }
         });
       }
-
-      // Execute the appropriate test based on testRecommendation
+      // Run the appropriate test
       let result: TestResult;
-      
-      if (testRecommendation.testName === "Two-Sample t-Test" || testRecommendation.testName === "Welch's t-Test") {
-        const groups = Object.keys(groupData);
-        if (groups.length !== 2) {
-          throw new Error('Two-sample test requires exactly two groups');
+      try {
+        if (testRecommendation.testName === "Two-Sample t-Test" || testRecommendation.testName === "Welch's t-Test") {
+          const groups = Object.keys(groupData);
+          if (groups.length !== 2) throw new Error('Two-sample test requires exactly two groups');
+          result = runTwoSampleTTest(groupData[groups[0]], groupData[groups[1]], testRecommendation.testName === "Two-Sample t-Test");
+        } else if (testRecommendation.testName === "One-way ANOVA") {
+          result = runOneWayANOVA(groupData);
+        } else if (testRecommendation.testName === "Welch's ANOVA") {
+          result = runWelchsANOVA(groupData);
+        } else if (testRecommendation.testName === "Mann-Whitney U Test") {
+          const groups = Object.keys(groupData);
+          if (groups.length !== 2) throw new Error('Mann-Whitney U test requires exactly two groups');
+          result = runMannWhitneyUTest(groupData[groups[0]], groupData[groups[1]]);
+        } else if (testRecommendation.testName === "Kruskal-Wallis Test") {
+          result = runKruskalWallisTest(groupData);
+        } else if (testRecommendation.testName === "Two-Proportion Z-Test") {
+          const groups = Object.keys(groupData);
+          if (groups.length !== 2) throw new Error('Two-proportion test requires exactly two groups');
+          result = runTwoProportionZTest(groupData[groups[0]], groupData[groups[1]]);
+        } else if (testRecommendation.testName === "Chi-Square Test for Independence") {
+          result = runChiSquareTest(groupData);
+        } else {
+          throw new Error(`Unsupported test type: ${testRecommendation.testName}`);
         }
-        
-        result = runTwoSampleTTest(
-          groupData[groups[0]],
-          groupData[groups[1]],
-          testRecommendation.testName === "Two-Sample t-Test"
-        );
-      } else if (testRecommendation.testName === "One-way ANOVA") {
-        result = runOneWayANOVA(groupData);
-      } else if (testRecommendation.testName === "Welch's ANOVA") {
-        result = runWelchsANOVA(groupData);
-      } else if (testRecommendation.testName === "Mann-Whitney U Test") {
-        const groups = Object.keys(groupData);
-        if (groups.length !== 2) {
-          throw new Error('Mann-Whitney U test requires exactly two groups');
-        }
-        
-        result = runMannWhitneyUTest(groupData[groups[0]], groupData[groups[1]]);
-      } else if (testRecommendation.testName === "Kruskal-Wallis Test") {
-        result = runKruskalWallisTest(groupData);
-      } else if (testRecommendation.testName === "Two-Proportion Z-Test") {
-        const groups = Object.keys(groupData);
-        if (groups.length !== 2) {
-          throw new Error('Two-proportion test requires exactly two groups');
-        }
-        
-        result = runTwoProportionZTest(groupData[groups[0]], groupData[groups[1]]);
-      } else if (testRecommendation.testName === "Chi-Square Test for Independence") {
-        result = runChiSquareTest(groupData);
-      } else {
-        throw new Error(`Unsupported test type: ${testRecommendation.testName}`);
-      }
-
-      // Add CUPED information to result if applicable
-      if (cupedResult && covariateAnalysis?.selectedCovariate) {
-        result.cupedApplied = true;
-        result.cupedTheta = cupedResult.theta;
-        result.cupedCovariate = covariateAnalysis.selectedCovariate;
-        result.cupedOriginalVariance = cupedResult.originalVariance;
-        result.cupedAdjustedVariance = cupedResult.adjustedVariance;
-        result.cupedVarianceReduction = cupedResult.varianceReduction;
-      }
-
-      setTestResult(result);
-      markTestExecuted();
-
-      // Check if bootstrapping should be applied
-      if (result && Object.keys(groupStats).length > 0) {
-        const groupNames = Object.keys(groupData);
-        
-        if (groupNames.length === 2) {
-          // Handle 2-group bootstrapping
-          const bootstrapCheck = shouldApplyBootstrap(result, groupStats);
-          if (bootstrapCheck.shouldApply) {
-            console.log('🎯 Bootstrapping conditions met for 2-group comparison - running bootstrap analysis');
-            
-            const group1Data = groupData[groupNames[0]];
-            const group2Data = groupData[groupNames[1]];
-            
-            // Perform bootstrapping
-            const bootstrapResult = performBootstrap(group1Data, group2Data);
-            bootstrapResult.reason = bootstrapCheck.reason;
-            
-            setBootstrapResult(bootstrapResult);
-            console.log('✅ Bootstrap analysis completed and results stored for 2-group comparison');
-          } else {
-            // Clear any previous bootstrap results
-            setBootstrapResult(null);
-            console.log('❌ Bootstrap conditions not met for 2-group comparison - clearing previous results');
+        // Add CUPED info if used
+        if (useCuped && cupedResult && covariateAnalysis?.selectedCovariate) {
+          result.cupedApplied = true;
+          result.cupedTheta = cupedResult.theta;
+          result.cupedCovariate = covariateAnalysis.selectedCovariate;
+          result.cupedOriginalVariance = cupedResult.originalVariance;
+          result.cupedAdjustedVariance = cupedResult.adjustedVariance;
+          result.cupedVarianceReduction = cupedResult.varianceReduction;
+          
+          // Add override flag if CUPED was applied to non-parametric test
+          if (cupedOverride) {
+            (result as any).cupedOverride = true;
           }
-        } else if (groupNames.length > 2) {
-          // For 3+ groups, bootstrapping is handled within post-hoc tests
-          // Clear primary bootstrap result as it's not applicable for multi-group
-          setBootstrapResult(null);
-          console.log(`📊 Multi-group comparison (${groupNames.length} groups) - bootstrapping will be evaluated per post-hoc pair`);
         }
+        setTestResult(result);
+        markTestExecuted();
+        // Bootstrap logic (optional, as before)
+        if (result && Object.keys(groupStats).length > 0) {
+          const groupNames = Object.keys(groupData);
+          if (groupNames.length === 2) {
+            const bootstrapCheck = shouldApplyBootstrap(result, groupStats);
+            if (bootstrapCheck.shouldApply) {
+              const group1Data = groupData[groupNames[0]];
+              const group2Data = groupData[groupNames[1]];
+              const bootstrapResult = performBootstrap(group1Data, group2Data);
+              bootstrapResult.reason = bootstrapCheck.reason;
+              setBootstrapResult(bootstrapResult);
+            } else {
+              setBootstrapResult(null);
+            }
+          } else if (groupNames.length > 2) {
+            setBootstrapResult(null);
+          }
+        }
+      } catch (error) {
+        console.error('Error executing statistical test:', error);
+        setTestResult(null);
+      } finally {
+        setIsRunningTest(false);
       }
-    } catch (error) {
-      console.error('Error executing statistical test:', error);
-      setTestResult(null);
-    } finally {
-      setIsRunningTest(false);
-    }
-  }, [testRecommendation, data, metricColumn, groupingColumn, isMetricContinuous, covariateAnalysis, calculateCUPED, runTwoSampleTTest, runOneWayANOVA, runWelchsANOVA, runMannWhitneyUTest, runKruskalWallisTest, runTwoProportionZTest, runChiSquareTest, markTestExecuted]);
+    }, 100);
+  }, [testRecommendation, data, metricColumn, groupingColumn, isMetricContinuous, covariateAnalysis, applyCUPED, cachedCupedResult, calculateCUPED, runTwoSampleTTest, runOneWayANOVA, runWelchsANOVA, runMannWhitneyUTest, runKruskalWallisTest, runTwoProportionZTest, runChiSquareTest, markTestExecuted, groupStats, shouldApplyBootstrap, performBootstrap]);
 
   // Post-hoc test functions
   const runTukeyHSD = useCallback((groupData: { [key: string]: number[] }, testResult?: TestResult): PostHocResult[] => {
@@ -2869,6 +2849,12 @@ const StatisticalAnalysis: React.FC = () => {
       setIsRunningPostHoc(false);
     }
   }, [testRecommendation, data, metricColumn, groupingColumn, testResult, runTukeyHSD, runGamesHowell, runDunnTest, runPairwiseProportionTests, saveTestResultsToFile]);
+
+  // 2. Reset CUPED cache and toggle when inputs change
+  useEffect(() => {
+    setCachedCupedResult(null);
+    setApplyCUPED(true);
+  }, [metricColumn, groupingColumn, covariateAnalysis]);
 
   return (
     <Box sx={{ width: '100%', typography: 'body1', p: 3, maxWidth: '1200px', mx: 'auto' }}>
@@ -3341,6 +3327,65 @@ const StatisticalAnalysis: React.FC = () => {
                     Statistical Test Execution
                   </Typography>
 
+                  {/* CUPED Toggle - Only show if CUPED is applicable */}
+                  {covariateAnalysis && covariateAnalysis.selectedCovariate && isMetricContinuous && columns.includes(covariateAnalysis.selectedCovariate) && (
+                    <Paper sx={{ p: 3, mb: 3, bgcolor: '#f8f9ff', border: '1px solid #1976d2' }}>
+                      <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                        <Box>
+                          <Typography variant="h6" sx={{ color: '#1976d2', fontWeight: 600, mb: 1 }}>
+                            🎯 CUPED Adjustment
+                          </Typography>
+                                                     <Typography variant="body2" sx={{ color: '#666' }}>
+                             Use CUPED-adjusted metrics for enhanced statistical power
+                             {(() => {
+                               const meanBasedTests = ["Two-Sample t-Test", "Welch's t-Test", "One-way ANOVA", "Welch's ANOVA"];
+                               const isMeanBasedTest = testRecommendation && meanBasedTests.includes(testRecommendation.testName);
+                               if (!isMeanBasedTest && testRecommendation) {
+                                 return (
+                                   <>
+                                     <br />
+                                     <span style={{ color: '#ff9800', fontWeight: 500 }}>
+                                       ⚠️ Note: Selected test ({testRecommendation.testName}) is non-parametric. CUPED works best with parametric tests.
+                                     </span>
+                                   </>
+                                 );
+                               }
+                               return null;
+                             })()}
+                           </Typography>
+                        </Box>
+                                                 <FormControlLabel
+                           control={
+                             <Switch
+                               checked={applyCUPED}
+                               onChange={(e) => {
+                                 setApplyCUPED(e.target.checked);
+                                 // Reset test results when toggle changes to force recalculation
+                                 if (testResult) {
+                                   setTestResult(null);
+                                   setInputsChanged(true);
+                                 }
+                               }}
+                               sx={{
+                                 '& .MuiSwitch-switchBase.Mui-checked': {
+                                   color: '#1976d2'
+                                 },
+                                 '& .MuiSwitch-switchBase.Mui-checked + .MuiSwitch-track': {
+                                   backgroundColor: '#1976d2'
+                                 }
+                               }}
+                             />
+                           }
+                          label={
+                            <Typography variant="body1" sx={{ fontWeight: 500, color: applyCUPED ? '#1976d2' : '#666' }}>
+                              Apply CUPED adjustment
+                            </Typography>
+                          }
+                        />
+                      </Box>
+                    </Paper>
+                  )}
+
                   {inputsChanged && testResult && (
                     <Alert severity="warning" sx={{ mb: 3 }}>
                       <Typography variant="body1">
@@ -3375,23 +3420,154 @@ const StatisticalAnalysis: React.FC = () => {
                     </Button>
                   </Box>
 
+                  {/* CUPED OFF Message - Show when CUPED is available but toggle is OFF */}
+                  {!applyCUPED && covariateAnalysis && covariateAnalysis.selectedCovariate && isMetricContinuous && columns.includes(covariateAnalysis.selectedCovariate) && (
+                    <Alert severity="info" sx={{ mb: 3 }}>
+                      <Typography variant="body1">
+                        <strong>CUPED Available:</strong> CUPED adjustment is available using covariate "{covariateAnalysis.selectedCovariate}" 
+                        (correlation: {covariateAnalysis.correlation.toFixed(4)}). Enable the toggle above to use CUPED-adjusted metrics for enhanced statistical power.
+                      </Typography>
+                    </Alert>
+                  )}
+
+                  {/* CUPED Summary Box - Show when toggle is ON and CUPED is applicable */}
+                  {applyCUPED && covariateAnalysis && covariateAnalysis.selectedCovariate && isMetricContinuous && columns.includes(covariateAnalysis.selectedCovariate) && cachedCupedResult && (
+                    <Paper sx={{ p: 3, mb: 3, bgcolor: '#e3f2fd', border: '2px solid #1976d2' }}>
+                      <Typography variant="h6" sx={{ mb: 2, color: '#1976d2', fontWeight: 600 }}>
+                        📊 CUPED Adjustment Details
+                      </Typography>
+                      
+                      <Grid container spacing={3}>
+                        <Grid item xs={12} md={6}>
+                          <Box sx={{ mb: 2 }}>
+                            <Typography variant="subtitle1" sx={{ fontWeight: 600, color: '#1976d2' }}>
+                              📌 Covariate Used:
+                            </Typography>
+                            <Typography variant="body1" sx={{ fontWeight: 500 }}>
+                              {covariateAnalysis.selectedCovariate}
+                            </Typography>
+                          </Box>
+                          
+                          <Box sx={{ mb: 2 }}>
+                            <Typography variant="subtitle1" sx={{ fontWeight: 600, color: '#1976d2' }}>
+                              📈 Correlation Coefficient:
+                            </Typography>
+                            <Typography variant="body1" sx={{ fontWeight: 500 }}>
+                              {covariateAnalysis.correlation.toFixed(4)}
+                            </Typography>
+                          </Box>
+                        </Grid>
+                        
+                        <Grid item xs={12} md={6}>
+                          <Box sx={{ mb: 2 }}>
+                            <Typography variant="subtitle1" sx={{ fontWeight: 600, color: '#1976d2' }}>
+                              📦 Original Variance:
+                            </Typography>
+                            <Typography variant="body1" sx={{ fontWeight: 500 }}>
+                              {cachedCupedResult.originalVariance.toFixed(4)}
+                            </Typography>
+                          </Box>
+                          
+                          <Box sx={{ mb: 2 }}>
+                            <Typography variant="subtitle1" sx={{ fontWeight: 600, color: '#1976d2' }}>
+                              📦 Adjusted Variance:
+                            </Typography>
+                            <Typography variant="body1" sx={{ fontWeight: 500 }}>
+                              {cachedCupedResult.adjustedVariance.toFixed(4)}
+                            </Typography>
+                          </Box>
+                        </Grid>
+                        
+                        <Grid item xs={12}>
+                          <Box sx={{ bgcolor: '#bbdefb', p: 2, borderRadius: 1 }}>
+                            <Typography variant="subtitle1" sx={{ fontWeight: 600, color: '#1976d2', mb: 1 }}>
+                              📉 Variance Reduction:
+                            </Typography>
+                            <Typography variant="h6" sx={{ fontWeight: 700, color: '#1976d2' }}>
+                              {cachedCupedResult.varianceReduction.toFixed(2)}%
+                            </Typography>
+                          </Box>
+                        </Grid>
+                        
+                        {/* CUPED-adjusted group means */}
+                        <Grid item xs={12}>
+                          <Typography variant="subtitle1" sx={{ fontWeight: 600, color: '#1976d2', mb: 1 }}>
+                            📊 CUPED-Adjusted Group Means:
+                          </Typography>
+                          <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 2 }}>
+                            {(() => {
+                              // Calculate adjusted group means
+                              const covariateColumn = covariateAnalysis.selectedCovariate as string;
+                              const alignedData = data.map(row => ({
+                                metric: parseFloat(String(row[metricColumn])),
+                                covariate: parseFloat(String(row[covariateColumn])),
+                                group: String(row[groupingColumn])
+                              })).filter(item => !isNaN(item.metric) && !isNaN(item.covariate));
+                              
+                              const adjustedGroupMeans: { [key: string]: number } = {};
+                              
+                              alignedData.forEach((item, index) => {
+                                const adjustedValue = cachedCupedResult.adjustedMetric[index];
+                                if (!adjustedGroupMeans[item.group]) {
+                                  adjustedGroupMeans[item.group] = 0;
+                                }
+                              });
+                              
+                              // Calculate means for each group
+                              const groupCounts: { [key: string]: number } = {};
+                              alignedData.forEach((item, index) => {
+                                const adjustedValue = cachedCupedResult.adjustedMetric[index];
+                                if (!groupCounts[item.group]) {
+                                  groupCounts[item.group] = 0;
+                                  adjustedGroupMeans[item.group] = 0;
+                                }
+                                adjustedGroupMeans[item.group] += adjustedValue;
+                                groupCounts[item.group]++;
+                              });
+                              
+                              // Finalize means
+                              Object.keys(adjustedGroupMeans).forEach(group => {
+                                adjustedGroupMeans[group] /= groupCounts[group];
+                              });
+                              
+                              return Object.entries(adjustedGroupMeans).map(([group, mean]) => (
+                                <Box key={group} sx={{ 
+                                  bgcolor: '#ffffff', 
+                                  p: 1.5, 
+                                  borderRadius: 1, 
+                                  border: '1px solid #1976d2',
+                                  minWidth: 120,
+                                  textAlign: 'center'
+                                }}>
+                                  <Typography variant="body2" sx={{ fontWeight: 600, color: '#1976d2' }}>
+                                    {group}
+                                  </Typography>
+                                  <Typography variant="body1" sx={{ fontWeight: 500 }}>
+                                    {mean.toFixed(4)}
+                                  </Typography>
+                                </Box>
+                              ));
+                            })()}
+                          </Box>
+                        </Grid>
+                      </Grid>
+                    </Paper>
+                  )}
+
                   {testResult && !inputsChanged && (
                     <Paper sx={{ p: 3, bgcolor: '#f8f9fa' }}>
                       {testResult.cupedApplied && (
-                        <Alert severity="info" sx={{ mb: 3 }}>
+                        <Alert severity={(testResult as any).cupedOverride ? "warning" : "info"} sx={{ mb: 3 }}>
                           <Typography variant="body1">
-                            CUPED applied using covariate: {testResult.cupedCovariate}
-                            <br />
-                            Theta (θ): {testResult.cupedTheta?.toFixed(4)}
-                            <br />
-                            <br />
-                            CUPED Variance Reduction Summary:
-                            <br />
-                            - Original variance (raw metric): {testResult.cupedOriginalVariance?.toFixed(2)}
-                            <br />
-                            - Adjusted variance (CUPED metric): {testResult.cupedAdjustedVariance?.toFixed(2)}
-                            <br />
-                            - Variance reduced by: {testResult.cupedVarianceReduction?.toFixed(2)}%
+                            <strong>CUPED Applied:</strong> Using covariate {testResult.cupedCovariate} with θ = {testResult.cupedTheta?.toFixed(4)}
+                            {(testResult as any).cupedOverride && (
+                              <>
+                                <br />
+                                <strong>⚠️ Note:</strong> CUPED is being applied to a non-parametric test ({testResult.testName}). 
+                                This is not the ideal scenario as CUPED is designed for mean-based comparisons. 
+                                Consider using parametric tests if your data allows it for optimal CUPED benefits.
+                              </>
+                            )}
                           </Typography>
                         </Alert>
                       )}
